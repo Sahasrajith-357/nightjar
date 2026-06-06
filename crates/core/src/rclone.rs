@@ -169,6 +169,45 @@ pub fn estimate_size(path: &std::path::Path) -> Result<u64> {
     Ok(size.bytes)
 }
 
+/// Checks that the remote is reachable by listing its top level.
+///
+/// Runs `rclone lsd <remote>: --max-depth 1`. Success means the remote
+/// responded (reachable). On failure, we make a best-effort guess from
+/// rclone's stderr: connectivity-like messages map to NetworkUnavailable,
+/// anything else to DestinationUnreachable. The raw rclone error detail is
+/// not discarded — a future refinement can inspect it further.
+pub fn check_reachable(remote: &str) -> Result<()> {
+    let target = format!("{remote}:");
+    let result = run(&["lsd", &target, "--max-depth", "1"]);
+
+    match result {
+        Ok(_) => Ok(()),
+        Err(Error::RcloneFailed { message, .. }) => {
+            // Best-effort classification of the failure. Network-connectivity
+            // failures from rclone typically mention these terms. This is a
+            // heuristic, deliberately conservative.
+            let lower = message.to_lowercase();
+            let looks_like_network = lower.contains("no such host")
+                || lower.contains("network is unreachable")
+                || lower.contains("connection refused")
+                || lower.contains("timeout")
+                || lower.contains("timed out")
+                || lower.contains("dial tcp")
+                || lower.contains("temporary failure in name resolution");
+
+            if looks_like_network {
+                Err(Error::NetworkUnavailable)
+            } else {
+                Err(Error::DestinationUnreachable {
+                    remote: remote.to_string(),
+                })
+            }
+        }
+        // RcloneNotFound, Io, or anything else propagates unchanged.
+        Err(other) => Err(other),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -236,5 +275,21 @@ mod tests {
         // Replace "cloud" with your actual remote name.
         let free = check_free_space("cloud").expect("free space query");
         assert!(free > 0, "a real remote should report some free space");
+    }
+
+    #[test]
+    fn reachable_errors_on_bogus_remote() {
+        // A nonexistent remote can't be reached; we just confirm it errors
+        // cleanly (the exact variant depends on rclone's message).
+        let result = check_reachable("definitely_not_a_real_remote_xyz");
+        assert!(result.is_err(), "a bogus remote should not be reachable");
+    }
+
+    #[test]
+    #[ignore = "requires a real configured remote with network access"]
+    fn reachable_against_real_remote() {
+        // Run manually: cargo test -- --ignored
+        // Replace "cloud" with your real remote.
+        check_reachable("cloud").expect("real remote should be reachable");
     }
 }
