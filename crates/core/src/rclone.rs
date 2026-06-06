@@ -276,6 +276,57 @@ pub fn copy_source(
     }
 }
 
+/// Builds the argument list for verifying one source against the
+/// destination. Pure — testable without running rclone.
+///
+/// Uses `check --one-way`: confirms every source file exists and matches
+/// in the destination, while ignoring extra files in the destination (which
+/// are expected, since backups are incremental and never delete).
+fn build_verify_args(source: &crate::config::Source, remote: &str, dest_path: &str) -> Vec<String> {
+    let source_str = source.path.to_string_lossy().to_string();
+    let dest = format!("{remote}:{dest_path}/{}", source.name);
+    vec![
+        "check".to_string(),
+        source_str,
+        dest,
+        "--one-way".to_string(),
+    ]
+}
+
+/// Verifies that a source folder was backed up correctly.
+///
+/// Runs `rclone check --one-way`. Interprets the exit code specifically:
+/// - exit 0          -> Ok(()): all source files present and matching
+/// - exit non-zero   -> Err(VerificationFailed): differences were found
+/// - failed to launch (binary missing, etc.) -> Err(RcloneNotFound / Io)
+///
+/// This does NOT use run(), because run() treats every non-zero exit as a
+/// generic failure; for check, a non-zero exit is a meaningful *result*
+/// (differences found), not a tool error.
+pub fn verify_source(source: &crate::config::Source, remote: &str, dest_path: &str) -> Result<()> {
+    let args = build_verify_args(source, remote, dest_path);
+    let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+
+    let result = rclone_command().args(&arg_refs).output();
+
+    let output = match result {
+        Ok(output) => output,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(Error::RcloneNotFound);
+        }
+        Err(e) => return Err(Error::Io(e)),
+    };
+
+    if output.status.success() {
+        // Exit 0: verified.
+        Ok(())
+    } else {
+        // Non-zero exit from check means differences were found. We surface
+        // this as VerificationFailed rather than a generic rclone error.
+        Err(Error::VerificationFailed)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -436,5 +487,40 @@ mod tests {
             path: src_dir.path().to_path_buf(),
         };
         copy_source(&source, "cloud", "NightjarBackup", &[]).expect("real copy should succeed");
+    }
+
+    #[test]
+    fn verify_args_include_one_way() {
+        let source = crate::config::Source {
+            name: "Documents".to_string(),
+            path: std::path::PathBuf::from("/home/user/Documents"),
+        };
+        let args = build_verify_args(&source, "cloud", "NightjarBackup");
+        assert_eq!(
+            args,
+            vec![
+                "check".to_string(),
+                "/home/user/Documents".to_string(),
+                "cloud:NightjarBackup/Documents".to_string(),
+                "--one-way".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    #[ignore = "requires a real configured remote with network access"]
+    fn verify_source_against_real_remote() {
+        // Run manually after a real backup: cargo test -- --ignored
+        use std::fs;
+        let src_dir = tempfile::tempdir().expect("src dir");
+        fs::write(src_dir.path().join("nightjar_test.txt"), b"test").expect("write");
+        let source = crate::config::Source {
+            name: "NightjarSelfTest".to_string(),
+            path: src_dir.path().to_path_buf(),
+        };
+        // First copy, then verify — should succeed.
+        copy_source(&source, "cloud", "NightjarBackup", &[]).expect("copy should succeed");
+        verify_source(&source, "cloud", "NightjarBackup")
+            .expect("verify should succeed after a fresh copy");
     }
 }
