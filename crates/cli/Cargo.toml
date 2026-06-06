@@ -8,3 +8,4 @@ repository.workspace = true
 
 [dependencies]
 nightjar-core.workspace = true
+clap = { version = "4", features = ["derive"] }
