@@ -3,6 +3,7 @@
 pub mod config;
 pub mod config_io;
 pub mod error;
+pub mod preflight;
 pub mod rclone;
 
 pub use config::Config;
