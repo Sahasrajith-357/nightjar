@@ -7,6 +7,7 @@
 
 use crate::error::Error;
 use crate::Result;
+use serde::Deserialize;
 use std::process::Command;
 
 /// The name of the rclone binary. We rely on it being on the system PATH
@@ -123,6 +124,51 @@ pub fn check_sources_exist(sources: &[crate::config::Source]) -> Result<()> {
     Ok(())
 }
 
+/// rclone's `about --json` output. We only need `free`; other fields are
+/// optional because not all backends report every field.
+#[derive(Debug, Deserialize)]
+struct AboutJson {
+    /// Free space in bytes. Absent on backends that don't report quota.
+    free: Option<u64>,
+}
+
+/// Queries free space at the destination remote via `rclone about --json`.
+///
+/// Returns the number of free bytes. If the backend does not report free
+/// space (the `free` field is absent), returns Error::SpaceCheckFailed so
+/// the caller can decide how to proceed rather than guessing.
+pub fn check_free_space(remote: &str) -> Result<u64> {
+    let target = format!("{remote}:");
+    let output = run(&["about", &target, "--json"])?;
+
+    let about: AboutJson = serde_json::from_str(&output.stdout)
+        .map_err(|e| Error::ConfigError(format!("could not parse rclone about output: {e}")))?;
+
+    about.free.ok_or(Error::SpaceCheckFailed)
+}
+
+/// rclone's `size --json` output. We need the total `bytes`.
+#[derive(Debug, Deserialize)]
+struct SizeJson {
+    /// Total size of the listed files, in bytes.
+    bytes: u64,
+}
+
+/// Estimates the size in bytes of a local folder via `rclone size --json`.
+///
+/// Note: this is the *total* size of the folder, not the incremental
+/// delta. The delta (what actually needs transferring) is smaller for
+/// repeat backups; refining to the delta is a later improvement.
+pub fn estimate_size(path: &std::path::Path) -> Result<u64> {
+    let path_str = path.to_string_lossy();
+    let output = run(&["size", &path_str, "--json"])?;
+
+    let size: SizeJson = serde_json::from_str(&output.stdout)
+        .map_err(|e| Error::ConfigError(format!("could not parse rclone size output: {e}")))?;
+
+    Ok(size.bytes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -170,5 +216,25 @@ mod tests {
             matches!(result, Err(Error::RcloneNotConfigured { .. })),
             "a bogus remote name should be reported as not configured"
         );
+    }
+
+    #[test]
+    fn estimate_size_of_local_dir() {
+        // Create a temp dir with a known-size file and size it via rclone.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let file_path = dir.path().join("data.bin");
+        std::fs::write(&file_path, vec![0u8; 1024]).expect("write file");
+
+        let size = estimate_size(dir.path()).expect("estimate_size should work");
+        assert_eq!(size, 1024, "1024-byte file should size to 1024 bytes");
+    }
+
+    #[test]
+    #[ignore = "requires a real configured remote with network access"]
+    fn check_free_space_against_real_remote() {
+        // Run manually with: cargo test -- --ignored
+        // Replace "cloud" with your actual remote name.
+        let free = check_free_space("cloud").expect("free space query");
+        assert!(free > 0, "a real remote should report some free space");
     }
 }
