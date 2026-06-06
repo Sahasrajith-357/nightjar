@@ -208,6 +208,74 @@ pub fn check_reachable(remote: &str) -> Result<()> {
     }
 }
 
+/// Builds the exact argument list for an rclone copy of one source.
+///
+/// Pure function — no I/O, no rclone — so the command construction can be
+/// tested exhaustively. Destination layout is `<remote>:<dest_path>/<name>`.
+fn build_copy_args(
+    source: &crate::config::Source,
+    remote: &str,
+    dest_path: &str,
+    excludes: &[String],
+) -> Vec<String> {
+    let source_str = source.path.to_string_lossy().to_string();
+    let dest = format!("{remote}:{dest_path}/{}", source.name);
+
+    let mut args: Vec<String> = vec!["copy".to_string(), source_str, dest];
+    for pattern in excludes {
+        args.push("--exclude".to_string());
+        args.push(pattern.clone());
+    }
+    args
+}
+
+/// Copies a single source folder to the destination remote.
+///
+/// Runs `rclone copy <source.path> <remote>:<dest_path>/<source.name>` with
+/// the given excludes applied. `copy` is incremental: unchanged files are
+/// skipped, so repeat backups only transfer new/changed data. Existing
+/// destination files are never deleted (we use copy, not sync).
+///
+/// On failure, the error is interpreted: connectivity-like failures ->
+/// NetworkUnavailable, an out-of-space signature -> StorageFull, otherwise
+/// the original RcloneFailed propagates with its detail preserved.
+pub fn copy_source(
+    source: &crate::config::Source,
+    remote: &str,
+    dest_path: &str,
+    excludes: &[String],
+) -> Result<()> {
+    let args = build_copy_args(source, remote, dest_path, excludes);
+    let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+
+    match run(&arg_refs) {
+        Ok(_) => Ok(()),
+        Err(Error::RcloneFailed { message, code }) => {
+            let lower = message.to_lowercase();
+            if lower.contains("no such host")
+                || lower.contains("network is unreachable")
+                || lower.contains("connection refused")
+                || lower.contains("timeout")
+                || lower.contains("timed out")
+                || lower.contains("dial tcp")
+                || lower.contains("temporary failure in name resolution")
+            {
+                Err(Error::NetworkUnavailable)
+            } else if lower.contains("quota")
+                || lower.contains("storage full")
+                || lower.contains("no space left")
+                || lower.contains("insufficient storage")
+                || lower.contains("limit exceeded")
+            {
+                Err(Error::StorageFull)
+            } else {
+                Err(Error::RcloneFailed { message, code })
+            }
+        }
+        Err(other) => Err(other),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -291,5 +359,82 @@ mod tests {
         // Run manually: cargo test -- --ignored
         // Replace "cloud" with your real remote.
         check_reachable("cloud").expect("real remote should be reachable");
+    }
+
+    #[test]
+    fn copy_args_basic_destination_format() {
+        let source = crate::config::Source {
+            name: "Documents".to_string(),
+            path: std::path::PathBuf::from("/home/user/Documents"),
+        };
+        let args = build_copy_args(&source, "cloud", "NightjarBackup", &[]);
+        assert_eq!(
+            args,
+            vec![
+                "copy".to_string(),
+                "/home/user/Documents".to_string(),
+                "cloud:NightjarBackup/Documents".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn copy_args_appends_single_exclude() {
+        let source = crate::config::Source {
+            name: "Projects".to_string(),
+            path: std::path::PathBuf::from("/home/user/Projects"),
+        };
+        let excludes = vec!["**/.git/**".to_string()];
+        let args = build_copy_args(&source, "cloud", "Backup", &excludes);
+        assert_eq!(
+            args,
+            vec![
+                "copy".to_string(),
+                "/home/user/Projects".to_string(),
+                "cloud:Backup/Projects".to_string(),
+                "--exclude".to_string(),
+                "**/.git/**".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn copy_args_appends_multiple_excludes_in_order() {
+        let source = crate::config::Source {
+            name: "Code".to_string(),
+            path: std::path::PathBuf::from("/home/user/Code"),
+        };
+        let excludes = vec!["**/node_modules/**".to_string(), "**/target/**".to_string()];
+        let args = build_copy_args(&source, "remote", "dest", &excludes);
+        // Each exclude becomes a "--exclude" flag followed by its pattern,
+        // preserving order.
+        assert_eq!(
+            args,
+            vec![
+                "copy".to_string(),
+                "/home/user/Code".to_string(),
+                "remote:dest/Code".to_string(),
+                "--exclude".to_string(),
+                "**/node_modules/**".to_string(),
+                "--exclude".to_string(),
+                "**/target/**".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    #[ignore = "requires a real configured remote with network access"]
+    fn copy_source_against_real_remote() {
+        // Run manually: cargo test -- --ignored
+        // Backs up a temp file to a real remote. Replace "cloud" and the
+        // dest path as appropriate for your setup.
+        use std::fs;
+        let src_dir = tempfile::tempdir().expect("src dir");
+        fs::write(src_dir.path().join("nightjar_test.txt"), b"test").expect("write");
+        let source = crate::config::Source {
+            name: "NightjarSelfTest".to_string(),
+            path: src_dir.path().to_path_buf(),
+        };
+        copy_source(&source, "cloud", "NightjarBackup", &[]).expect("real copy should succeed");
     }
 }
