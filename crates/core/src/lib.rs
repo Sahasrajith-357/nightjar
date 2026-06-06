@@ -3,6 +3,7 @@
 pub mod config;
 pub mod config_io;
 pub mod error;
+pub mod rclone;
 
 pub use config::Config;
 pub use error::Error;
