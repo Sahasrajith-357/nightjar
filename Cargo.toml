@@ -1,0 +1,17 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/core",
+    "crates/cli",
+    "crates/gui",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+authors = ["Sahasrajith M"]
+repository = "https://github.com/Sahasrajith-357/nightjar"
+
+[workspace.dependencies]
+nightjar-core = { path = "crates/core" }

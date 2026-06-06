@@ -1,0 +1,18 @@
+# Rust build artifacts
+/target/
+
+# Backup/swap files from editors
+*.swp
+*~
+
+# Environment / secrets
+.env
+*.key
+*.pem
+credentials.json
+
+# OS noise
+.DS_Store
+
+# rust-analyzer / IDE local files
+.idea/
