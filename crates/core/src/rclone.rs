@@ -84,17 +84,91 @@ pub fn check_installed() -> Result<String> {
     Ok(first_line)
 }
 
+/// Checks that the given remote is configured in rclone.
+///
+/// Runs `rclone listremotes` (which prints one remote per line, each with a
+/// trailing colon, e.g. "cloud:") and confirms `remote` is among them.
+/// Returns Error::RcloneNotConfigured if it is not present.
+pub fn check_remote_configured(remote: &str) -> Result<()> {
+    let output = run(&["listremotes"])?;
+
+    // Each line is a remote name, conventionally with a trailing ':'.
+    // Normalize by stripping any trailing colon before comparing.
+    let found = output.stdout.lines().any(|line| {
+        let name = line.trim().trim_end_matches(':');
+        name == remote
+    });
+
+    if found {
+        Ok(())
+    } else {
+        Err(Error::RcloneNotConfigured {
+            remote: remote.to_string(),
+        })
+    }
+}
+
+/// Checks that every configured source folder exists and is a directory.
+///
+/// Returns Error::SourceMissing with the offending path on the first
+/// source that does not exist or is not a directory.
+pub fn check_sources_exist(sources: &[crate::config::Source]) -> Result<()> {
+    for source in sources {
+        if !source.path.is_dir() {
+            return Err(Error::SourceMissing {
+                path: source.path.display().to_string(),
+            });
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Source;
+    use std::path::PathBuf;
 
     #[test]
     fn rclone_is_installed() {
-        // This test assumes rclone is installed on the test machine.
         let version = check_installed().expect("rclone should be installed");
         assert!(
             version.to_lowercase().contains("rclone"),
             "version line should mention rclone, got: {version}"
+        );
+    }
+
+    #[test]
+    fn sources_exist_passes_for_real_dirs() {
+        // A temp dir definitely exists and is a directory.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let sources = vec![Source {
+            name: "Temp".to_string(),
+            path: dir.path().to_path_buf(),
+        }];
+        assert!(check_sources_exist(&sources).is_ok());
+    }
+
+    #[test]
+    fn sources_exist_fails_for_missing_dir() {
+        let sources = vec![Source {
+            name: "Ghost".to_string(),
+            path: PathBuf::from("/this/path/does/not/exist"),
+        }];
+        let result = check_sources_exist(&sources);
+        assert!(
+            matches!(result, Err(Error::SourceMissing { .. })),
+            "missing source should produce SourceMissing"
+        );
+    }
+
+    #[test]
+    fn unconfigured_remote_is_detected() {
+        // A remote name almost certainly not configured on any machine.
+        let result = check_remote_configured("definitely_not_a_real_remote_xyz");
+        assert!(
+            matches!(result, Err(Error::RcloneNotConfigured { .. })),
+            "a bogus remote name should be reported as not configured"
         );
     }
 }
