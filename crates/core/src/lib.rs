@@ -1,6 +1,7 @@
 //! Core engine for nightjar: the backup logic, shared by the CLI and GUI.
 
 pub mod config;
+pub mod config_io;
 pub mod error;
 
 pub use config::Config;

@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 /// The complete nightjar configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Config {
     /// The rclone remote to back up to (e.g. "cloud"), as configured in rclone.
     pub remote: String,
@@ -31,7 +31,7 @@ pub struct Config {
 }
 
 /// A single local folder the user wants backed up.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Source {
     /// A human-friendly label for this source (e.g. "Documents").
     pub name: String,
