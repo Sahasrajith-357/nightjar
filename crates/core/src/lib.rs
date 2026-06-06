@@ -5,6 +5,7 @@ pub mod config;
 pub mod config_io;
 pub mod error;
 pub mod partial;
+pub mod poweroff;
 pub mod preflight;
 pub mod rclone;
 pub mod state;
