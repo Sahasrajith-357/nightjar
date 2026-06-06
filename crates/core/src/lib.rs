@@ -5,6 +5,7 @@ pub mod config_io;
 pub mod error;
 pub mod preflight;
 pub mod rclone;
+pub mod state;
 
 pub use config::Config;
 pub use error::Error;
