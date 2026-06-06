@@ -1,14 +1,9 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
-}
+//! Core engine for nightjar: the backup logic, shared by the CLI and GUI.
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+pub mod error;
 
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
-}
+pub use error::Error;
+
+/// Convenient alias so functions in this crate can return `Result<T>`
+/// instead of writing `Result<T, error::Error>` everywhere.
+pub type Result<T> = std::result::Result<T, Error>;
