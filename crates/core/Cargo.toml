@@ -8,3 +8,5 @@ repository.workspace = true
 
 [dependencies]
 thiserror = "2.0"
+serde = { version = "1.0", features = ["derive"] }
+toml = "1.0"
