@@ -8,3 +8,4 @@ repository.workspace = true
 
 [dependencies]
 nightjar-core.workspace = true
+iced = "0.14"
