@@ -7,7 +7,7 @@
 //! exhaustively-tested partial-selection logic.
 
 use iced::theme::Palette;
-use iced::widget::{button, checkbox, column, container, pick_list, row, text};
+use iced::widget::{button, checkbox, column, container, pick_list, progress_bar, row, text};
 use iced::{Color, Element, Font, Length, Task, Theme};
 use nightjar_core::backup;
 use nightjar_core::config::Config;
@@ -65,7 +65,13 @@ enum Phase {
         /// Parallel to `sized`: whether each folder is selected.
         checked: Vec<bool>,
     },
-    BackingUp,
+    /// A backup is running, source by source. Carries the full ordered list
+    /// of sources to back up, how many have completed, and the current name.
+    BackingUp {
+        sources: Vec<Source>,
+        done: usize,
+        current: String,
+    },
     Finished(BackupOutcome),
 }
 
@@ -84,7 +90,6 @@ enum Message {
     RemoteSelected(String),
     PowerOffToggled(bool),
     StartBackup,
-    BackupFinished(BackupOutcome),
     SizesMeasured(Vec<SizedSource>, u64),
     FolderToggled(usize, bool),
     AutoFill,
@@ -92,6 +97,8 @@ enum Message {
     AddFolderClicked,
     FolderPicked(Option<PathBuf>),
     RemoveSource(usize),
+    /// One source finished backing up (Ok = copied+verified).
+    SourceDone(Result<(), String>),
 }
 
 fn boot() -> (App, Task<Message>) {
@@ -186,16 +193,25 @@ async fn pick_folder() -> Option<PathBuf> {
         .map(|handle| handle.path().to_path_buf())
 }
 
-async fn run_full_backup_blocking(config: Config) -> BackupOutcome {
-    tokio::task::spawn_blocking(move || backup::run_full_backup(&config))
+async fn backup_one_blocking(config: Config, source: Source) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || backup::backup_one_source(&config, &source))
         .await
-        .unwrap_or_else(|e| BackupOutcome::Failed(format!("internal task error: {e}")))
+        .unwrap_or_else(|e| Err(format!("internal task error: {e}")))
 }
 
-async fn run_partial_backup_blocking(config: Config, selected: Vec<SizedSource>) -> BackupOutcome {
-    tokio::task::spawn_blocking(move || backup::run_partial_backup(&config, &selected))
-        .await
-        .unwrap_or_else(|e| BackupOutcome::Failed(format!("internal task error: {e}")))
+/// Given the ordered sources and how many are done, either launches the next
+/// source's backup or, if all are done, returns None to signal completion.
+fn next_source_task(config: &Config, sources: &[Source], done: usize) -> Option<Task<Message>> {
+    if done < sources.len() {
+        let config = config.clone();
+        let source = sources[done].clone();
+        Some(Task::perform(
+            backup_one_blocking(config, source),
+            Message::SourceDone,
+        ))
+    } else {
+        None
+    }
 }
 
 fn human_bytes(bytes: u64) -> String {
@@ -312,8 +328,18 @@ impl App {
             Message::StartBackup => {
                 if let Some(config) = &self.config {
                     let config = config.clone();
-                    self.phase = Phase::BackingUp;
-                    Task::perform(run_full_backup_blocking(config), Message::BackupFinished)
+                    let sources = config.sources.clone();
+                    if sources.is_empty() {
+                        return Task::none();
+                    }
+                    let current = sources[0].name.clone();
+                    let task = next_source_task(&config, &sources, 0).unwrap_or(Task::none());
+                    self.phase = Phase::BackingUp {
+                        sources,
+                        done: 0,
+                        current,
+                    };
+                    task
                 } else {
                     Task::none()
                 }
@@ -338,11 +364,17 @@ impl App {
                         partial::CustomValidation::Fits { .. } if !chosen.is_empty() => {
                             if let Some(config) = &self.config {
                                 let config = config.clone();
-                                self.phase = Phase::BackingUp;
-                                return Task::perform(
-                                    run_partial_backup_blocking(config, chosen),
-                                    Message::BackupFinished,
-                                );
+                                let sources: Vec<Source> =
+                                    chosen.iter().map(|s| s.source.clone()).collect();
+                                let current = sources[0].name.clone();
+                                let task =
+                                    next_source_task(&config, &sources, 0).unwrap_or(Task::none());
+                                self.phase = Phase::BackingUp {
+                                    sources,
+                                    done: 0,
+                                    current,
+                                };
+                                return task;
                             }
                         }
                         _ => {
@@ -353,19 +385,67 @@ impl App {
                 }
                 Task::none()
             }
-            Message::BackupFinished(outcome) => {
-                if self.power_off {
-                    if let Some(permit) = outcome.power_off_permit() {
-                        if let Err(e) = nightjar_core::poweroff::power_off(permit) {
-                            self.phase = Phase::Finished(BackupOutcome::Failed(format!(
-                                "Backup succeeded, but power-off failed: {e}"
-                            )));
+            Message::SourceDone(result) => {
+                if let Phase::BackingUp { sources, done, .. } = &mut self.phase {
+                    match result {
+                        Err(message) => {
+                            // First failure: stop, do not touch later sources.
+                            let outcome = BackupOutcome::Failed(message);
+                            // (No power-off: Failed yields no permit.)
+                            self.phase = Phase::Finished(outcome);
                             return Task::none();
                         }
+                        Ok(()) => {
+                            *done += 1;
+                            let done_now = *done;
+                            let total = sources.len();
+                            let sources_clone = sources.clone();
+                            if done_now < total {
+                                // Advance to the next source.
+                                if let Some(config) = &self.config {
+                                    let current = sources_clone[done_now].name.clone();
+                                    let task = next_source_task(config, &sources_clone, done_now)
+                                        .unwrap_or(Task::none());
+                                    if let Phase::BackingUp { current: c, .. } = &mut self.phase {
+                                        *c = current;
+                                    }
+                                    return task;
+                                }
+                                Task::none()
+                            } else {
+                                // All sources copied and verified.
+                                // Full vs partial: full only if we backed up
+                                // exactly the whole configured set.
+                                let is_full = self
+                                    .config
+                                    .as_ref()
+                                    .map(|c| c.sources.len() == total)
+                                    .unwrap_or(false);
+                                let outcome = if is_full {
+                                    BackupOutcome::FullVerified
+                                } else {
+                                    BackupOutcome::PartialVerified
+                                };
+                                // Power-off gate (verified-only permit).
+                                if self.power_off {
+                                    if let Some(permit) = outcome.power_off_permit() {
+                                        if let Err(e) = nightjar_core::poweroff::power_off(permit) {
+                                            self.phase =
+                                                Phase::Finished(BackupOutcome::Failed(format!(
+                                                    "Backup succeeded, but power-off failed: {e}"
+                                                )));
+                                            return Task::none();
+                                        }
+                                    }
+                                }
+                                self.phase = Phase::Finished(outcome);
+                                Task::none()
+                            }
+                        }
                     }
+                } else {
+                    Task::none()
                 }
-                self.phase = Phase::Finished(outcome);
-                Task::none()
             }
             Message::AddFolderClicked => {
                 self.notice = None;
@@ -604,8 +684,17 @@ impl App {
                     .spacing(12),
                 );
             }
-            Phase::BackingUp => {
-                content = content.push(text("Backing up... please wait.").size(18));
+            Phase::BackingUp {
+                sources,
+                done,
+                current,
+            } => {
+                let total = sources.len() as f32;
+                let value = *done as f32;
+                content = content
+                    .push(text(format!("Backing up '{}'...", current)).size(18))
+                    .push(text(format!("{} of {} folders done", done, sources.len())).size(13))
+                    .push(progress_bar(0.0..=total, value).length(Length::Fixed(360.0)));
             }
             Phase::Finished(outcome) => match outcome {
                 BackupOutcome::FullVerified => {
