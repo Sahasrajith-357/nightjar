@@ -8,13 +8,21 @@
 
 use iced::theme::Palette;
 use iced::widget::{button, checkbox, column, container, row, text};
-use iced::{Color, Element, Length, Task, Theme};
+use iced::{Color, Element, Font, Length, Task, Theme};
 use nightjar_core::backup;
 use nightjar_core::config::Config;
 use nightjar_core::config_io;
 use nightjar_core::partial::{self, SizedSource};
 use nightjar_core::preflight::{self, PreflightReport, SpaceStatus};
 use nightjar_core::state::BackupOutcome;
+
+/// Embedded fonts (bundled in crates/gui/fonts/).
+const BLANKA_BYTES: &[u8] = include_bytes!("../fonts/Blanka-Regular.otf");
+const MONO_BYTES: &[u8] = include_bytes!("../fonts/JetBrainsMono-Regular.ttf");
+
+/// Font handles, keyed to each font's internal family name.
+const BLANKA: Font = Font::with_name("Blanka");
+const MONO: Font = Font::with_name("JetBrains Mono");
 
 /// nightjar's custom theme — a warm "ember" dark palette built from the
 /// coral keyboard color and a Death Note crimson accent.
@@ -315,13 +323,18 @@ impl App {
     }
 
     fn view(&self) -> Element<'_, Message> {
-        let mut content = column![
-            text("nightjar")
-                .size(48)
-                .color(Color::from_rgb8(0xeb, 0x96, 0x7c)),
-            text("A backup tool that runs while you sleep.").size(16),
-        ]
-        .spacing(12);
+        let title = text("NIGHTJAR")
+            .font(BLANKA)
+            .size(72)
+            .color(Color::from_rgb8(0xeb, 0x96, 0x7c));
+
+        let tagline = text("A backup tool that runs while you sleep.")
+            .size(15)
+            .color(Color::from_rgb8(0x9a, 0x8f, 0x95));
+
+        let mut content = column![title, tagline]
+            .spacing(8)
+            .align_x(iced::Alignment::Center);
 
         match &self.phase {
             Phase::Checking => {
@@ -465,10 +478,10 @@ impl App {
             },
         }
 
-        container(content.spacing(12))
+        container(content.spacing(16).align_x(iced::Alignment::Center))
             .center_x(Length::Fill)
             .center_y(Length::Fill)
-            .padding(40)
+            .padding(48)
             .into()
     }
 
@@ -481,6 +494,9 @@ fn main() -> iced::Result {
     iced::application(boot, App::update, App::view)
         .title("nightjar")
         .theme(App::theme)
+        .font(BLANKA_BYTES)
+        .font(MONO_BYTES)
+        .default_font(MONO)
         .centered()
         .run()
 }
