@@ -8,4 +8,5 @@ repository.workspace = true
 
 [dependencies]
 nightjar-core.workspace = true
-iced = "0.14"
+iced = { version = "0.14", features = ["tokio"] }
+tokio = { version = "1", features = ["rt"] }

@@ -1,68 +1,90 @@
 //! nightjar graphical interface (iced).
 //!
-//! 7-ii-a: load config and run preflight synchronously at startup, then
-//! display the result (size, free space, verdict) or a clear message if
-//! the config is missing / a check failed. Preflight runs on the boot
-//! thread for now, so the window appears once it completes; making this
-//! asynchronous is the next step.
+//! 7-ii-b: the window opens instantly in a "Checking..." state while
+//! preflight runs on a background (blocking) thread via tokio::spawn_blocking,
+//! delivering its result back as a message. The UI never blocks.
 
 use iced::widget::{column, container, text};
-use iced::{Element, Length, Theme};
+use iced::{Element, Length, Task, Theme};
 use nightjar_core::config_io;
 use nightjar_core::preflight::{self, PreflightReport, SpaceStatus};
 
-/// What the startup preflight produced.
-enum Status {
-    /// Config missing or unreadable; carries a guidance message.
+/// The result the background preflight produces. Cloneable so it can travel
+/// in a Message (iced requires Message: Clone).
+#[derive(Debug, Clone)]
+enum PreflightResult {
     NoConfig(String),
-    /// Preflight ran but failed a hard gate; carries the error text.
     Failed(String),
-    /// Preflight succeeded; carries the report and the remote name.
     Ready {
         remote: String,
         report: PreflightReport,
     },
 }
 
-/// The application state.
+/// The display state.
+enum Status {
+    Checking,
+    Done(PreflightResult),
+}
+
 struct App {
     status: Status,
 }
 
-impl Default for App {
-    fn default() -> Self {
-        App {
-            status: load_and_preflight(),
-        }
-    }
+/// Messages the application reacts to.
+#[derive(Debug, Clone)]
+enum Message {
+    /// The background preflight has finished.
+    PreflightFinished(PreflightResult),
 }
 
-/// Loads config and runs preflight synchronously, producing a Status.
-fn load_and_preflight() -> Status {
+/// Boot: start in the Checking state AND kick off the background preflight.
+/// Returns (initial_state, initial_task).
+fn boot() -> (App, Task<Message>) {
+    let app = App {
+        status: Status::Checking,
+    };
+    // Run the blocking preflight on tokio's blocking thread pool, then map
+    // its result into a Message. spawn_blocking returns a future that iced
+    // (running on tokio) can drive via Task::perform.
+    let task = Task::perform(run_preflight_blocking(), Message::PreflightFinished);
+    (app, task)
+}
+
+/// Awaitable wrapper that runs the blocking preflight off the UI thread.
+async fn run_preflight_blocking() -> PreflightResult {
+    tokio::task::spawn_blocking(load_and_preflight)
+        .await
+        // If the blocking task itself panicked, surface it as a Failed.
+        .unwrap_or_else(|e| PreflightResult::Failed(format!("internal task error: {e}")))
+}
+
+/// The actual blocking work: load config, run preflight.
+fn load_and_preflight() -> PreflightResult {
     let path = match config_io::config_path() {
         Ok(p) => p,
         Err(e) => {
-            return Status::NoConfig(format!("Could not determine config location: {e}"));
+            return PreflightResult::NoConfig(format!("Could not determine config location: {e}"));
         }
     };
-
     let config = match config_io::load_from(&path) {
         Ok(c) => c,
         Err(e) => {
-            return Status::NoConfig(format!("No usable config at {}:\n{e}", path.display()));
+            return PreflightResult::NoConfig(format!(
+                "No usable config at {}:\n{e}",
+                path.display()
+            ));
         }
     };
-
     match preflight::preflight(&config) {
-        Ok(report) => Status::Ready {
+        Ok(report) => PreflightResult::Ready {
             remote: config.remote.clone(),
             report,
         },
-        Err(e) => Status::Failed(format!("{e}")),
+        Err(e) => PreflightResult::Failed(format!("{e}")),
     }
 }
 
-/// Formats a byte count as a human-readable string (e.g. "1.50 GiB").
 fn human_bytes(bytes: u64) -> String {
     const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
     let mut size = bytes as f64;
@@ -78,13 +100,14 @@ fn human_bytes(bytes: u64) -> String {
     }
 }
 
-/// Events the application reacts to. None yet in this step.
-#[derive(Debug, Clone)]
-enum Message {}
-
 impl App {
-    fn update(&mut self, _message: Message) {
-        // No interactions yet.
+    fn update(&mut self, message: Message) -> Task<Message> {
+        match message {
+            Message::PreflightFinished(result) => {
+                self.status = Status::Done(result);
+                Task::none()
+            }
+        }
     }
 
     fn view(&self) -> Element<'_, Message> {
@@ -94,15 +117,15 @@ impl App {
         ]
         .spacing(12);
 
-        // Add a section describing the preflight result.
         content = match &self.status {
-            Status::NoConfig(msg) => content
+            Status::Checking => content.push(text("Checking your backup setup...").size(18)),
+            Status::Done(PreflightResult::NoConfig(msg)) => content
                 .push(text("No configuration found").size(22))
                 .push(text(msg.clone()).size(14)),
-            Status::Failed(msg) => content
+            Status::Done(PreflightResult::Failed(msg)) => content
                 .push(text("Preflight failed").size(22))
                 .push(text(msg.clone()).size(14)),
-            Status::Ready { remote, report } => {
+            Status::Done(PreflightResult::Ready { remote, report }) => {
                 let verdict = match &report.space {
                     SpaceStatus::Fits { free_bytes } => format!(
                         "Fits — {} free. A full backup can proceed.",
@@ -112,7 +135,7 @@ impl App {
                         free_bytes,
                         needed_bytes,
                     } => format!(
-                        "Shortfall — need {} but only {} free. A partial backup would be offered.",
+                        "Shortfall — need {} but only {} free.",
                         human_bytes(*needed_bytes),
                         human_bytes(*free_bytes)
                     ),
@@ -146,7 +169,7 @@ impl App {
 }
 
 fn main() -> iced::Result {
-    iced::application(App::default, App::update, App::view)
+    iced::application(boot, App::update, App::view)
         .title("nightjar")
         .theme(App::theme)
         .centered()
