@@ -6,14 +6,31 @@
 //! selected" action enabled only when the selection fits. Reuses the
 //! exhaustively-tested partial-selection logic.
 
+use iced::theme::Palette;
 use iced::widget::{button, checkbox, column, container, row, text};
-use iced::{Element, Length, Task, Theme};
+use iced::{Color, Element, Length, Task, Theme};
 use nightjar_core::backup;
 use nightjar_core::config::Config;
 use nightjar_core::config_io;
 use nightjar_core::partial::{self, SizedSource};
 use nightjar_core::preflight::{self, PreflightReport, SpaceStatus};
 use nightjar_core::state::BackupOutcome;
+
+/// nightjar's custom theme — a warm "ember" dark palette built from the
+/// coral keyboard color and a Death Note crimson accent.
+fn nightjar_theme() -> Theme {
+    Theme::custom(
+        "nightjar".to_string(),
+        Palette {
+            background: Color::from_rgb8(0x16, 0x13, 0x1a), // near-black ember charcoal
+            text: Color::from_rgb8(0xc9, 0xbf, 0xc4),       // warm grey
+            primary: Color::from_rgb8(0xeb, 0x96, 0x7c),    // coral (your keyboard)
+            success: Color::from_rgb8(0xeb, 0x96, 0x7c),    // coral (verified = warm, on-theme)
+            warning: Color::from_rgb8(0xd9, 0xa0, 0x5b),    // warm amber
+            danger: Color::from_rgb8(0x74, 0x19, 0x24),     // crimson (Death Note)
+        },
+    )
+}
 
 #[derive(Debug, Clone)]
 enum PreflightResult {
@@ -299,7 +316,9 @@ impl App {
 
     fn view(&self) -> Element<'_, Message> {
         let mut content = column![
-            text("nightjar").size(40),
+            text("nightjar")
+                .size(48)
+                .color(Color::from_rgb8(0xeb, 0x96, 0x7c)),
             text("A backup tool that runs while you sleep.").size(16),
         ]
         .spacing(12);
@@ -454,7 +473,7 @@ impl App {
     }
 
     fn theme(&self) -> Theme {
-        Theme::Dark
+        nightjar_theme()
     }
 }
 
