@@ -11,11 +11,13 @@ use iced::widget::{button, checkbox, column, container, pick_list, row, text};
 use iced::{Color, Element, Font, Length, Task, Theme};
 use nightjar_core::backup;
 use nightjar_core::config::Config;
+use nightjar_core::config::Source;
 use nightjar_core::config_io;
 use nightjar_core::partial::{self, SizedSource};
 use nightjar_core::preflight::{self, PreflightReport, SpaceStatus};
 use nightjar_core::rclone;
 use nightjar_core::state::BackupOutcome;
+use std::path::PathBuf;
 
 /// Embedded fonts (bundled in crates/gui/fonts/).
 const BLANKA_BYTES: &[u8] = include_bytes!("../fonts/Blanka-Regular.otf");
@@ -73,6 +75,7 @@ struct App {
     phase: Phase,
     power_off: bool,
     remotes: Vec<String>,
+    notice: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -86,6 +89,9 @@ enum Message {
     FolderToggled(usize, bool),
     AutoFill,
     StartPartial,
+    AddFolderClicked,
+    FolderPicked(Option<PathBuf>),
+    RemoveSource(usize),
 }
 
 fn boot() -> (App, Task<Message>) {
@@ -95,6 +101,7 @@ fn boot() -> (App, Task<Message>) {
         phase: Phase::Checking,
         power_off: false,
         remotes: Vec::new(),
+        notice: None,
     };
     let task = Task::perform(
         run_preflight_blocking(),
@@ -170,6 +177,15 @@ async fn measure_sizes_blocking(config: Config, free_bytes: u64) -> (Vec<SizedSo
     (sized, free_bytes)
 }
 
+/// Opens the native folder picker asynchronously, returning the chosen path.
+async fn pick_folder() -> Option<PathBuf> {
+    rfd::AsyncFileDialog::new()
+        .set_title("Choose a folder to back up")
+        .pick_folder()
+        .await
+        .map(|handle| handle.path().to_path_buf())
+}
+
 async fn run_full_backup_blocking(config: Config) -> BackupOutcome {
     tokio::task::spawn_blocking(move || backup::run_full_backup(&config))
         .await
@@ -213,6 +229,7 @@ impl App {
                 self.remote = remote;
                 self.config = config.clone();
                 self.remotes = remotes;
+                self.notice = None;
                 // If shortfall, jump straight into measuring.
                 if let PreflightResult::Ready { report } = &result {
                     if let SpaceStatus::Shortfall { free_bytes, .. } = report.space {
@@ -350,6 +367,61 @@ impl App {
                 self.phase = Phase::Finished(outcome);
                 Task::none()
             }
+            Message::AddFolderClicked => {
+                self.notice = None;
+                Task::perform(pick_folder(), Message::FolderPicked)
+            }
+            Message::FolderPicked(path) => {
+                let path = match path {
+                    Some(p) => p,
+                    None => return Task::none(), // user cancelled
+                };
+                // Derive a name from the folder's basename.
+                let name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "Folder".to_string());
+
+                if let Some(config) = &mut self.config {
+                    // Reject duplicates by name (would collide at the destination).
+                    if config.sources.iter().any(|s| s.name == name) {
+                        self.notice = Some(format!("A folder named '{name}' is already selected."));
+                        return Task::none();
+                    }
+                    config.sources.push(Source { name, path });
+                    if let Ok(cfgpath) = config_io::config_path() {
+                        let _ = config_io::save_to(config, &cfgpath);
+                    }
+                    // Sources changed → re-run preflight.
+                    self.phase = Phase::Checking;
+                    return Task::perform(
+                        run_preflight_blocking(),
+                        |(result, config, remote, remotes)| {
+                            Message::PreflightFinished(result, config, remote, remotes)
+                        },
+                    );
+                }
+                Task::none()
+            }
+            Message::RemoveSource(index) => {
+                self.notice = None;
+                if let Some(config) = &mut self.config {
+                    if index < config.sources.len() {
+                        config.sources.remove(index);
+                        if let Ok(cfgpath) = config_io::config_path() {
+                            let _ = config_io::save_to(config, &cfgpath);
+                        }
+                        self.phase = Phase::Checking;
+                        return Task::perform(
+                            run_preflight_blocking(),
+                            |(result, config, remote, remotes)| {
+                                Message::PreflightFinished(result, config, remote, remotes)
+                            },
+                        );
+                    }
+                }
+                Task::none()
+            }
         }
     }
 
@@ -380,6 +452,32 @@ impl App {
                 ]
                 .spacing(10)
                 .align_y(iced::Alignment::Center),
+            );
+        }
+        // Source folder list + add button (shown once config is loaded).
+        if let Some(config) = &self.config {
+            let mut sources_col = column![text("Folders to back up:").size(14)].spacing(6);
+            for (i, s) in config.sources.iter().enumerate() {
+                sources_col = sources_col.push(
+                    row![
+                        text(format!("{}  ({})", s.name, s.path.display())).size(13),
+                        button(text("✕").size(12)).on_press(Message::RemoveSource(i)),
+                    ]
+                    .spacing(10)
+                    .align_y(iced::Alignment::Center),
+                );
+            }
+            sources_col =
+                sources_col.push(button(text("+ Add folder")).on_press(Message::AddFolderClicked));
+            content = content.push(sources_col);
+        }
+
+        // Notice (e.g. duplicate folder).
+        if let Some(notice) = &self.notice {
+            content = content.push(
+                text(notice.clone())
+                    .size(13)
+                    .color(Color::from_rgb8(0xd9, 0xa0, 0x5b)),
             );
         }
 
