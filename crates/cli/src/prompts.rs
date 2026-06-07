@@ -104,6 +104,22 @@ pub fn parse_partial_method(value: &str) -> Result<PartialChoice, String> {
     }
 }
 
+/// Prints a prompt and reads one line. Returns None on non-interactive
+/// stdin or EOF (so callers never block unattended).
+pub fn read_line_prompt(prompt: &str) -> Option<String> {
+    if !stdin_is_interactive() {
+        return None;
+    }
+    print!("{prompt}");
+    let _ = io::stdout().flush();
+    let mut line = String::new();
+    match io::stdin().read_line(&mut line) {
+        Ok(0) => None,
+        Ok(_) => Some(line),
+        Err(_) => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
