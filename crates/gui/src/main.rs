@@ -1,88 +1,114 @@
 //! nightjar graphical interface (iced).
 //!
-//! 7-ii-b: the window opens instantly in a "Checking..." state while
-//! preflight runs on a background (blocking) thread via tokio::spawn_blocking,
-//! delivering its result back as a message. The UI never blocks.
+//! 7-iii: adds a "Back up now" button that runs a FULL backup on a
+//! background thread (tokio::spawn_blocking + Task::perform — the same
+//! bridge proven for preflight), keeping the UI responsive. Per-source
+//! status and the verified outcome are displayed. The partial-backup
+//! decision UI (for the Shortfall case) is added in the next step.
 
-use iced::widget::{column, container, text};
+use iced::widget::{button, column, container, text};
 use iced::{Element, Length, Task, Theme};
+use nightjar_core::backup;
+use nightjar_core::config::Config;
 use nightjar_core::config_io;
 use nightjar_core::preflight::{self, PreflightReport, SpaceStatus};
+use nightjar_core::state::BackupOutcome;
 
-/// The result the background preflight produces. Cloneable so it can travel
-/// in a Message (iced requires Message: Clone).
+/// The result the background preflight produces.
 #[derive(Debug, Clone)]
 enum PreflightResult {
     NoConfig(String),
     Failed(String),
-    Ready {
-        remote: String,
-        report: PreflightReport,
-    },
+    Ready { report: PreflightReport },
 }
 
-/// The display state.
-enum Status {
+/// Where we are in the app's lifecycle.
+enum Phase {
+    /// Preflight still running.
     Checking,
-    Done(PreflightResult),
+    /// Preflight finished; showing its result. Carries the loaded config
+    /// when it succeeded (needed to launch a backup).
+    Ready {
+        result: PreflightResult,
+        config: Option<Config>,
+    },
+    /// A backup is running.
+    BackingUp,
+    /// A backup finished; showing the outcome.
+    Finished(BackupOutcome),
 }
 
 struct App {
-    status: Status,
+    remote: String,
+    phase: Phase,
 }
 
-/// Messages the application reacts to.
 #[derive(Debug, Clone)]
 enum Message {
-    /// The background preflight has finished.
-    PreflightFinished(PreflightResult),
+    PreflightFinished(PreflightResult, Option<Config>, String),
+    StartBackup,
+    BackupFinished(BackupOutcome),
 }
 
-/// Boot: start in the Checking state AND kick off the background preflight.
-/// Returns (initial_state, initial_task).
+/// Boot: start in Checking and kick off the background preflight.
 fn boot() -> (App, Task<Message>) {
     let app = App {
-        status: Status::Checking,
+        remote: String::new(),
+        phase: Phase::Checking,
     };
-    // Run the blocking preflight on tokio's blocking thread pool, then map
-    // its result into a Message. spawn_blocking returns a future that iced
-    // (running on tokio) can drive via Task::perform.
-    let task = Task::perform(run_preflight_blocking(), Message::PreflightFinished);
+    let task = Task::perform(run_preflight_blocking(), |(result, config, remote)| {
+        Message::PreflightFinished(result, config, remote)
+    });
     (app, task)
 }
 
-/// Awaitable wrapper that runs the blocking preflight off the UI thread.
-async fn run_preflight_blocking() -> PreflightResult {
+/// Runs the blocking preflight off the UI thread, returning the result, the
+/// loaded config (if any, to launch a backup later), and the remote name.
+async fn run_preflight_blocking() -> (PreflightResult, Option<Config>, String) {
     tokio::task::spawn_blocking(load_and_preflight)
         .await
-        // If the blocking task itself panicked, surface it as a Failed.
-        .unwrap_or_else(|e| PreflightResult::Failed(format!("internal task error: {e}")))
+        .unwrap_or_else(|e| {
+            (
+                PreflightResult::Failed(format!("internal task error: {e}")),
+                None,
+                String::new(),
+            )
+        })
 }
 
-/// The actual blocking work: load config, run preflight.
-fn load_and_preflight() -> PreflightResult {
+fn load_and_preflight() -> (PreflightResult, Option<Config>, String) {
     let path = match config_io::config_path() {
         Ok(p) => p,
         Err(e) => {
-            return PreflightResult::NoConfig(format!("Could not determine config location: {e}"));
+            return (
+                PreflightResult::NoConfig(format!("Could not determine config location: {e}")),
+                None,
+                String::new(),
+            );
         }
     };
     let config = match config_io::load_from(&path) {
         Ok(c) => c,
         Err(e) => {
-            return PreflightResult::NoConfig(format!(
-                "No usable config at {}:\n{e}",
-                path.display()
-            ));
+            return (
+                PreflightResult::NoConfig(format!("No usable config at {}:\n{e}", path.display())),
+                None,
+                String::new(),
+            );
         }
     };
+    let remote = config.remote.clone();
     match preflight::preflight(&config) {
-        Ok(report) => PreflightResult::Ready {
-            remote: config.remote.clone(),
-            report,
-        },
-        Err(e) => PreflightResult::Failed(format!("{e}")),
+        Ok(report) => (PreflightResult::Ready { report }, Some(config), remote),
+        Err(e) => (PreflightResult::Failed(format!("{e}")), None, remote),
     }
+}
+
+/// Runs a full backup off the UI thread.
+async fn run_backup_blocking(config: Config) -> BackupOutcome {
+    tokio::task::spawn_blocking(move || backup::run_full_backup(&config))
+        .await
+        .unwrap_or_else(|e| BackupOutcome::Failed(format!("internal task error: {e}")))
 }
 
 fn human_bytes(bytes: u64) -> String {
@@ -103,8 +129,28 @@ fn human_bytes(bytes: u64) -> String {
 impl App {
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
-            Message::PreflightFinished(result) => {
-                self.status = Status::Done(result);
+            Message::PreflightFinished(result, config, remote) => {
+                self.remote = remote;
+                self.phase = Phase::Ready { result, config };
+                Task::none()
+            }
+            Message::StartBackup => {
+                // Only start if we have a config (i.e. preflight succeeded).
+                // Take the config out of the Ready phase to move it into the task.
+                if let Phase::Ready {
+                    config: Some(config),
+                    ..
+                } = &self.phase
+                {
+                    let config = config.clone();
+                    self.phase = Phase::BackingUp;
+                    Task::perform(run_backup_blocking(config), Message::BackupFinished)
+                } else {
+                    Task::none()
+                }
+            }
+            Message::BackupFinished(outcome) => {
+                self.phase = Phase::Finished(outcome);
                 Task::none()
             }
         }
@@ -117,46 +163,88 @@ impl App {
         ]
         .spacing(12);
 
-        content = match &self.status {
-            Status::Checking => content.push(text("Checking your backup setup...").size(18)),
-            Status::Done(PreflightResult::NoConfig(msg)) => content
-                .push(text("No configuration found").size(22))
-                .push(text(msg.clone()).size(14)),
-            Status::Done(PreflightResult::Failed(msg)) => content
-                .push(text("Preflight failed").size(22))
-                .push(text(msg.clone()).size(14)),
-            Status::Done(PreflightResult::Ready { remote, report }) => {
-                let verdict = match &report.space {
-                    SpaceStatus::Fits { free_bytes } => format!(
-                        "Fits — {} free. A full backup can proceed.",
-                        human_bytes(*free_bytes)
-                    ),
-                    SpaceStatus::Shortfall {
-                        free_bytes,
-                        needed_bytes,
-                    } => format!(
-                        "Shortfall — need {} but only {} free.",
-                        human_bytes(*needed_bytes),
-                        human_bytes(*free_bytes)
-                    ),
-                    SpaceStatus::Unknown => {
-                        "Free space unknown — the remote did not report it.".to_string()
-                    }
-                };
-                content
-                    .push(text(format!("Remote: {remote}")).size(18))
-                    .push(
-                        text(format!(
-                            "Backup size: {}",
-                            human_bytes(report.backup_size_bytes)
-                        ))
-                        .size(18),
-                    )
-                    .push(text(verdict).size(16))
+        match &self.phase {
+            Phase::Checking => {
+                content = content.push(text("Checking your backup setup...").size(18));
             }
-        };
+            Phase::Ready { result, .. } => match result {
+                PreflightResult::NoConfig(msg) => {
+                    content = content
+                        .push(text("No configuration found").size(22))
+                        .push(text(msg.clone()).size(14));
+                }
+                PreflightResult::Failed(msg) => {
+                    content = content
+                        .push(text("Preflight failed").size(22))
+                        .push(text(msg.clone()).size(14));
+                }
+                PreflightResult::Ready { report } => {
+                    content = content
+                        .push(text(format!("Remote: {}", self.remote)).size(18))
+                        .push(
+                            text(format!(
+                                "Backup size: {}",
+                                human_bytes(report.backup_size_bytes)
+                            ))
+                            .size(18),
+                        );
+                    match &report.space {
+                        SpaceStatus::Fits { free_bytes } => {
+                            content = content
+                                .push(
+                                    text(format!(
+                                        "Fits — {} free. Ready to back up.",
+                                        human_bytes(*free_bytes)
+                                    ))
+                                    .size(16),
+                                )
+                                .push(button(text("Back up now")).on_press(Message::StartBackup));
+                        }
+                        SpaceStatus::Shortfall {
+                            free_bytes,
+                            needed_bytes,
+                        } => {
+                            content = content.push(
+                                text(format!(
+                                    "Shortfall — need {} but only {} free. \
+                                     Partial backup UI coming soon.",
+                                    human_bytes(*needed_bytes),
+                                    human_bytes(*free_bytes)
+                                ))
+                                .size(16),
+                            );
+                        }
+                        SpaceStatus::Unknown => {
+                            content = content
+                                .push(
+                                    text("Free space unknown — proceeding will attempt a full backup.")
+                                        .size(16),
+                                )
+                                .push(button(text("Back up now")).on_press(Message::StartBackup));
+                        }
+                    }
+                }
+            },
+            Phase::BackingUp => {
+                content = content.push(text("Backing up... please wait.").size(18));
+            }
+            Phase::Finished(outcome) => match outcome {
+                BackupOutcome::FullVerified => {
+                    content = content.push(text("✓ Full backup completed and verified.").size(20));
+                }
+                BackupOutcome::PartialVerified => {
+                    content =
+                        content.push(text("✓ Partial backup completed and verified.").size(20));
+                }
+                BackupOutcome::Failed(msg) => {
+                    content = content
+                        .push(text("✗ Backup failed").size(20))
+                        .push(text(msg.clone()).size(14));
+                }
+            },
+        }
 
-        container(content)
+        container(content.spacing(12))
             .center_x(Length::Fill)
             .center_y(Length::Fill)
             .padding(40)
