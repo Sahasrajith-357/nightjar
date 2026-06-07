@@ -95,8 +95,8 @@ enum Message {
     AutoFill,
     StartPartial,
     AddFolderClicked,
-    FolderPicked(Option<PathBuf>),
-    RemoveSource(usize),
+    FoldersPicked(Vec<PathBuf>),
+    RemoveSource(PathBuf),
     /// One source finished backing up (Ok = copied+verified).
     SourceDone(Result<(), String>),
 }
@@ -184,13 +184,20 @@ async fn measure_sizes_blocking(config: Config, free_bytes: u64) -> (Vec<SizedSo
     (sized, free_bytes)
 }
 
-/// Opens the native folder picker asynchronously, returning the chosen path.
-async fn pick_folder() -> Option<PathBuf> {
+/// Opens the native folder picker (multi-select) asynchronously, returning
+/// the chosen paths (empty if cancelled).
+async fn pick_folders() -> Vec<PathBuf> {
     rfd::AsyncFileDialog::new()
-        .set_title("Choose a folder to back up")
-        .pick_folder()
+        .set_title("Choose folders to back up")
+        .pick_folders()
         .await
-        .map(|handle| handle.path().to_path_buf())
+        .map(|handles| {
+            handles
+                .into_iter()
+                .map(|h| h.path().to_path_buf())
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 async fn backup_one_blocking(config: Config, source: Source) -> Result<(), String> {
@@ -449,30 +456,54 @@ impl App {
             }
             Message::AddFolderClicked => {
                 self.notice = None;
-                Task::perform(pick_folder(), Message::FolderPicked)
+                Task::perform(pick_folders(), Message::FoldersPicked)
             }
-            Message::FolderPicked(path) => {
-                let path = match path {
-                    Some(p) => p,
-                    None => return Task::none(), // user cancelled
-                };
-                // Derive a name from the folder's basename.
-                let name = path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_else(|| "Folder".to_string());
+            Message::FoldersPicked(paths) => {
+                if paths.is_empty() {
+                    return Task::none(); // cancelled
+                }
+                let mut added = 0usize;
+                let mut skipped: Vec<String> = Vec::new();
 
                 if let Some(config) = &mut self.config {
-                    // Reject duplicates by name (would collide at the destination).
-                    if config.sources.iter().any(|s| s.name == name) {
-                        self.notice = Some(format!("A folder named '{name}' is already selected."));
-                        return Task::none();
+                    for path in paths {
+                        let name = path
+                            .file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_else(|| "Folder".to_string());
+
+                        // Skip duplicates by path OR name (name collision would
+                        // clash at the destination).
+                        let dup = config
+                            .sources
+                            .iter()
+                            .any(|s| s.path == path || s.name == name);
+                        if dup {
+                            skipped.push(name);
+                            continue;
+                        }
+                        config.sources.push(Source { name, path });
+                        added += 1;
                     }
-                    config.sources.push(Source { name, path });
-                    if let Ok(cfgpath) = config_io::config_path() {
-                        let _ = config_io::save_to(config, &cfgpath);
+
+                    if added > 0 {
+                        if let Ok(cfgpath) = config_io::config_path() {
+                            let _ = config_io::save_to(config, &cfgpath);
+                        }
                     }
-                    // Sources changed → re-run preflight.
+                }
+
+                // Build a notice if anything was skipped.
+                if !skipped.is_empty() {
+                    self.notice = Some(format!(
+                        "Skipped (already selected): {}",
+                        skipped.join(", ")
+                    ));
+                } else {
+                    self.notice = None;
+                }
+
+                if added > 0 {
                     self.phase = Phase::Checking;
                     return Task::perform(
                         run_preflight_blocking(),
@@ -483,11 +514,12 @@ impl App {
                 }
                 Task::none()
             }
-            Message::RemoveSource(index) => {
+            Message::RemoveSource(path) => {
                 self.notice = None;
                 if let Some(config) = &mut self.config {
-                    if index < config.sources.len() {
-                        config.sources.remove(index);
+                    let before = config.sources.len();
+                    config.sources.retain(|s| s.path != path);
+                    if config.sources.len() != before {
                         if let Ok(cfgpath) = config_io::config_path() {
                             let _ = config_io::save_to(config, &cfgpath);
                         }
@@ -537,18 +569,28 @@ impl App {
         // Source folder list + add button (shown once config is loaded).
         if let Some(config) = &self.config {
             let mut sources_col = column![text("Folders to back up:").size(14)].spacing(6);
-            for (i, s) in config.sources.iter().enumerate() {
+            if config.sources.is_empty() {
                 sources_col = sources_col.push(
-                    row![
-                        text(format!("{}  ({})", s.name, s.path.display())).size(13),
-                        button(text("✕").size(12)).on_press(Message::RemoveSource(i)),
-                    ]
-                    .spacing(10)
-                    .align_y(iced::Alignment::Center),
+                    text("No folders selected yet. Add folders to back up.")
+                        .size(13)
+                        .color(Color::from_rgb8(0x9a, 0x8f, 0x95)),
                 );
+            } else {
+                for s in &config.sources {
+                    let path = s.path.clone();
+                    sources_col = sources_col.push(
+                        row![
+                            text(format!("{}  ({})", s.name, s.path.display())).size(13),
+                            button(text("✕").size(12))
+                                .on_press(Message::RemoveSource(path)),
+                        ]
+                        .spacing(10)
+                        .align_y(iced::Alignment::Center),
+                    );
+                }
             }
-            sources_col =
-                sources_col.push(button(text("+ Add folder")).on_press(Message::AddFolderClicked));
+            sources_col = sources_col
+                .push(button(text("+ Add folders")).on_press(Message::AddFolderClicked));
             content = content.push(sources_col);
         }
 
