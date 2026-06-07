@@ -5,8 +5,8 @@
 //! Locating rclone is centralized in `rclone_command()` so that a
 //! configurable path could be added later in one place.
 
-use crate::error::Error;
 use crate::Result;
+use crate::error::Error;
 use serde::Deserialize;
 use std::process::Command;
 
@@ -107,6 +107,19 @@ pub fn check_remote_configured(remote: &str) -> Result<()> {
             remote: remote.to_string(),
         })
     }
+}
+
+/// Returns the names of all configured rclone remotes (trailing colons
+/// stripped). Useful for letting a user pick among their remotes.
+pub fn list_remotes() -> Result<Vec<String>> {
+    let output = run(&["listremotes"])?;
+    let remotes = output
+        .stdout
+        .lines()
+        .map(|line| line.trim().trim_end_matches(':').to_string())
+        .filter(|name| !name.is_empty())
+        .collect();
+    Ok(remotes)
 }
 
 /// Checks that every configured source folder exists and is a directory.
@@ -522,5 +535,13 @@ mod tests {
         copy_source(&source, "cloud", "NightjarBackup", &[]).expect("copy should succeed");
         verify_source(&source, "cloud", "NightjarBackup")
             .expect("verify should succeed after a fresh copy");
+    }
+
+    #[test]
+    #[ignore = "requires rclone with at least one configured remote"]
+    fn list_remotes_includes_configured() {
+        let remotes = list_remotes().expect("listremotes should work");
+        // On the dev machine, "cloud" is configured.
+        assert!(remotes.iter().any(|r| r == "cloud"));
     }
 }
