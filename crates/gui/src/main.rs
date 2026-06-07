@@ -6,11 +6,12 @@
 //! status and the verified outcome are displayed. The partial-backup
 //! decision UI (for the Shortfall case) is added in the next step.
 
-use iced::widget::{button, column, container, text};
+use iced::widget::{button, checkbox, column, container, text};
 use iced::{Element, Length, Task, Theme};
 use nightjar_core::backup;
 use nightjar_core::config::Config;
 use nightjar_core::config_io;
+use nightjar_core::poweroff;
 use nightjar_core::preflight::{self, PreflightReport, SpaceStatus};
 use nightjar_core::state::BackupOutcome;
 
@@ -41,11 +42,13 @@ enum Phase {
 struct App {
     remote: String,
     phase: Phase,
+    power_off: bool,
 }
 
 #[derive(Debug, Clone)]
 enum Message {
     PreflightFinished(PreflightResult, Option<Config>, String),
+    PowerOffToggled(bool),
     StartBackup,
     BackupFinished(BackupOutcome),
 }
@@ -55,6 +58,7 @@ fn boot() -> (App, Task<Message>) {
     let app = App {
         remote: String::new(),
         phase: Phase::Checking,
+        power_off: false,
     };
     let task = Task::perform(run_preflight_blocking(), |(result, config, remote)| {
         Message::PreflightFinished(result, config, remote)
@@ -134,9 +138,11 @@ impl App {
                 self.phase = Phase::Ready { result, config };
                 Task::none()
             }
+            Message::PowerOffToggled(value) => {
+                self.power_off = value;
+                Task::none()
+            }
             Message::StartBackup => {
-                // Only start if we have a config (i.e. preflight succeeded).
-                // Take the config out of the Ready phase to move it into the task.
                 if let Phase::Ready {
                     config: Some(config),
                     ..
@@ -150,6 +156,23 @@ impl App {
                 }
             }
             Message::BackupFinished(outcome) => {
+                // If the user asked to power off AND the outcome is verified,
+                // attempt a clean shutdown. The permit can only be obtained
+                // from a verified outcome, so a failure cannot power off.
+                if self.power_off {
+                    if let Some(permit) = outcome.power_off_permit() {
+                        if let Err(e) = poweroff::power_off(permit) {
+                            // Power-off failed (e.g. permissions): show it
+                            // instead of silently doing nothing.
+                            self.phase = Phase::Finished(BackupOutcome::Failed(format!(
+                                "Backup succeeded, but power-off failed: {e}"
+                            )));
+                            return Task::none();
+                        }
+                        // On success the machine is going down; nothing more
+                        // to display.
+                    }
+                }
                 self.phase = Phase::Finished(outcome);
                 Task::none()
             }
@@ -198,6 +221,11 @@ impl App {
                                     ))
                                     .size(16),
                                 )
+                                .push(
+                                    checkbox(self.power_off)
+                                        .label("Power off after a successful backup")
+                                        .on_toggle(Message::PowerOffToggled),
+                                )
                                 .push(button(text("Back up now")).on_press(Message::StartBackup));
                         }
                         SpaceStatus::Shortfall {
@@ -219,6 +247,11 @@ impl App {
                                 .push(
                                     text("Free space unknown — proceeding will attempt a full backup.")
                                         .size(16),
+                                )
+                                .push(
+                                    checkbox(self.power_off)
+                                        .label("Power off after a successful backup")
+                                        .on_toggle(Message::PowerOffToggled),
                                 )
                                 .push(button(text("Back up now")).on_press(Message::StartBackup));
                         }
