@@ -7,13 +7,14 @@
 //! exhaustively-tested partial-selection logic.
 
 use iced::theme::Palette;
-use iced::widget::{button, checkbox, column, container, row, text};
+use iced::widget::{button, checkbox, column, container, pick_list, row, text};
 use iced::{Color, Element, Font, Length, Task, Theme};
 use nightjar_core::backup;
 use nightjar_core::config::Config;
 use nightjar_core::config_io;
 use nightjar_core::partial::{self, SizedSource};
 use nightjar_core::preflight::{self, PreflightReport, SpaceStatus};
+use nightjar_core::rclone;
 use nightjar_core::state::BackupOutcome;
 
 /// Embedded fonts (bundled in crates/gui/fonts/).
@@ -71,21 +72,19 @@ struct App {
     config: Option<Config>,
     phase: Phase,
     power_off: bool,
+    remotes: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
 enum Message {
-    PreflightFinished(PreflightResult, Option<Config>, String),
+    PreflightFinished(PreflightResult, Option<Config>, String, Vec<String>),
+    RemoteSelected(String),
     PowerOffToggled(bool),
     StartBackup,
     BackupFinished(BackupOutcome),
-    /// Per-source sizes finished measuring (for the shortfall flow).
     SizesMeasured(Vec<SizedSource>, u64),
-    /// A folder checkbox in the choosing view was toggled (index, new value).
     FolderToggled(usize, bool),
-    /// Auto-fill the selection using smallest-first.
     AutoFill,
-    /// Start the partial backup with the currently-checked folders.
     StartPartial,
 }
 
@@ -95,23 +94,32 @@ fn boot() -> (App, Task<Message>) {
         config: None,
         phase: Phase::Checking,
         power_off: false,
+        remotes: Vec::new(),
     };
-    let task = Task::perform(run_preflight_blocking(), |(result, config, remote)| {
-        Message::PreflightFinished(result, config, remote)
-    });
+    let task = Task::perform(
+        run_preflight_blocking(),
+        |(result, config, remote, remotes)| {
+            Message::PreflightFinished(result, config, remote, remotes)
+        },
+    );
     (app, task)
 }
 
-async fn run_preflight_blocking() -> (PreflightResult, Option<Config>, String) {
-    tokio::task::spawn_blocking(load_and_preflight)
-        .await
-        .unwrap_or_else(|e| {
-            (
-                PreflightResult::Failed(format!("internal task error: {e}")),
-                None,
-                String::new(),
-            )
-        })
+async fn run_preflight_blocking() -> (PreflightResult, Option<Config>, String, Vec<String>) {
+    tokio::task::spawn_blocking(|| {
+        let remotes = rclone::list_remotes().unwrap_or_default();
+        let (result, config, remote) = load_and_preflight();
+        (result, config, remote, remotes)
+    })
+    .await
+    .unwrap_or_else(|e| {
+        (
+            PreflightResult::Failed(format!("internal task error: {e}")),
+            None,
+            String::new(),
+            Vec::new(),
+        )
+    })
 }
 
 fn load_and_preflight() -> (PreflightResult, Option<Config>, String) {
@@ -201,9 +209,10 @@ fn selected_total(sized: &[SizedSource], checked: &[bool]) -> u64 {
 impl App {
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
-            Message::PreflightFinished(result, config, remote) => {
+            Message::PreflightFinished(result, config, remote, remotes) => {
                 self.remote = remote;
                 self.config = config.clone();
+                self.remotes = remotes;
                 // If shortfall, jump straight into measuring.
                 if let PreflightResult::Ready { report } = &result {
                     if let SpaceStatus::Shortfall { free_bytes, .. } = report.space {
@@ -218,6 +227,28 @@ impl App {
                 }
                 self.phase = Phase::Ready { result };
                 Task::none()
+            }
+            Message::RemoteSelected(name) => {
+                // Update the config's remote, persist it, and re-run preflight.
+                if let Some(config) = &mut self.config {
+                    if config.remote == name {
+                        return Task::none(); // no change
+                    }
+                    config.remote = name.clone();
+                    // Persist; ignore save errors for now beyond logging.
+                    if let Ok(path) = config_io::config_path() {
+                        let _ = config_io::save_to(config, &path);
+                    }
+                }
+                self.remote = name;
+                self.phase = Phase::Checking;
+                // Re-run preflight (and re-fetch remotes) against the new remote.
+                Task::perform(
+                    run_preflight_blocking(),
+                    |(result, config, remote, remotes)| {
+                        Message::PreflightFinished(result, config, remote, remotes)
+                    },
+                )
             }
             Message::PowerOffToggled(value) => {
                 self.power_off = value;
@@ -335,6 +366,22 @@ impl App {
         let mut content = column![title, tagline]
             .spacing(8)
             .align_x(iced::Alignment::Center);
+        // Remote selector (shown once remotes are known).
+        if !self.remotes.is_empty() {
+            let selected = if self.remote.is_empty() {
+                None
+            } else {
+                Some(self.remote.clone())
+            };
+            content = content.push(
+                row![
+                    text("Cloud remote:").size(14),
+                    pick_list(self.remotes.clone(), selected, Message::RemoteSelected),
+                ]
+                .spacing(10)
+                .align_y(iced::Alignment::Center),
+            );
+        }
 
         match &self.phase {
             Phase::Checking => {
