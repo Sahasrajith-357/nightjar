@@ -1,21 +1,20 @@
 //! nightjar graphical interface (iced).
 //!
-//! 7-iii: adds a "Back up now" button that runs a FULL backup on a
-//! background thread (tokio::spawn_blocking + Task::perform — the same
-//! bridge proven for preflight), keeping the UI responsive. Per-source
-//! status and the verified outcome are displayed. The partial-backup
-//! decision UI (for the Shortfall case) is added in the next step.
+//! 7-iv-b: when preflight reports a shortfall, measure each source's size
+//! asynchronously, then present a per-folder checklist with a running total
+//! against free space, an auto-fill (smallest-first) button, and a "Back up
+//! selected" action enabled only when the selection fits. Reuses the
+//! exhaustively-tested partial-selection logic.
 
-use iced::widget::{button, checkbox, column, container, text};
+use iced::widget::{button, checkbox, column, container, row, text};
 use iced::{Element, Length, Task, Theme};
 use nightjar_core::backup;
 use nightjar_core::config::Config;
 use nightjar_core::config_io;
-use nightjar_core::poweroff;
+use nightjar_core::partial::{self, SizedSource};
 use nightjar_core::preflight::{self, PreflightReport, SpaceStatus};
 use nightjar_core::state::BackupOutcome;
 
-/// The result the background preflight produces.
 #[derive(Debug, Clone)]
 enum PreflightResult {
     NoConfig(String),
@@ -23,24 +22,28 @@ enum PreflightResult {
     Ready { report: PreflightReport },
 }
 
-/// Where we are in the app's lifecycle.
+/// The app lifecycle, including the shortfall sub-states.
 enum Phase {
-    /// Preflight still running.
     Checking,
-    /// Preflight finished; showing its result. Carries the loaded config
-    /// when it succeeded (needed to launch a backup).
     Ready {
         result: PreflightResult,
-        config: Option<Config>,
     },
-    /// A backup is running.
+    /// Shortfall detected; measuring each source's size in the background.
+    Measuring,
+    /// Sizes known; user is choosing which folders to include.
+    Choosing {
+        free_bytes: u64,
+        sized: Vec<SizedSource>,
+        /// Parallel to `sized`: whether each folder is selected.
+        checked: Vec<bool>,
+    },
     BackingUp,
-    /// A backup finished; showing the outcome.
     Finished(BackupOutcome),
 }
 
 struct App {
     remote: String,
+    config: Option<Config>,
     phase: Phase,
     power_off: bool,
 }
@@ -51,12 +54,20 @@ enum Message {
     PowerOffToggled(bool),
     StartBackup,
     BackupFinished(BackupOutcome),
+    /// Per-source sizes finished measuring (for the shortfall flow).
+    SizesMeasured(Vec<SizedSource>, u64),
+    /// A folder checkbox in the choosing view was toggled (index, new value).
+    FolderToggled(usize, bool),
+    /// Auto-fill the selection using smallest-first.
+    AutoFill,
+    /// Start the partial backup with the currently-checked folders.
+    StartPartial,
 }
 
-/// Boot: start in Checking and kick off the background preflight.
 fn boot() -> (App, Task<Message>) {
     let app = App {
         remote: String::new(),
+        config: None,
         phase: Phase::Checking,
         power_off: false,
     };
@@ -66,8 +77,6 @@ fn boot() -> (App, Task<Message>) {
     (app, task)
 }
 
-/// Runs the blocking preflight off the UI thread, returning the result, the
-/// loaded config (if any, to launch a backup later), and the remote name.
 async fn run_preflight_blocking() -> (PreflightResult, Option<Config>, String) {
     tokio::task::spawn_blocking(load_and_preflight)
         .await
@@ -108,9 +117,34 @@ fn load_and_preflight() -> (PreflightResult, Option<Config>, String) {
     }
 }
 
-/// Runs a full backup off the UI thread.
-async fn run_backup_blocking(config: Config) -> BackupOutcome {
+/// Measures each source size off the UI thread, returning SizedSources.
+async fn measure_sizes_blocking(config: Config, free_bytes: u64) -> (Vec<SizedSource>, u64) {
+    let sized = tokio::task::spawn_blocking(move || {
+        let mut out = Vec::new();
+        for source in &config.sources {
+            // On a measurement error, treat the size as 0 so the folder still
+            // appears; a 0 never wrongly inflates the total.
+            let size = nightjar_core::rclone::estimate_size(&source.path).unwrap_or(0);
+            out.push(SizedSource {
+                source: source.clone(),
+                size_bytes: size,
+            });
+        }
+        out
+    })
+    .await
+    .unwrap_or_default();
+    (sized, free_bytes)
+}
+
+async fn run_full_backup_blocking(config: Config) -> BackupOutcome {
     tokio::task::spawn_blocking(move || backup::run_full_backup(&config))
+        .await
+        .unwrap_or_else(|e| BackupOutcome::Failed(format!("internal task error: {e}")))
+}
+
+async fn run_partial_backup_blocking(config: Config, selected: Vec<SizedSource>) -> BackupOutcome {
+    tokio::task::spawn_blocking(move || backup::run_partial_backup(&config, &selected))
         .await
         .unwrap_or_else(|e| BackupOutcome::Failed(format!("internal task error: {e}")))
 }
@@ -130,47 +164,131 @@ fn human_bytes(bytes: u64) -> String {
     }
 }
 
+/// Sum the sizes of the currently-checked folders.
+fn selected_total(sized: &[SizedSource], checked: &[bool]) -> u64 {
+    sized
+        .iter()
+        .zip(checked.iter())
+        .filter(|(_, c)| **c)
+        .fold(0u64, |acc, (s, _)| acc.saturating_add(s.size_bytes))
+}
+
 impl App {
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::PreflightFinished(result, config, remote) => {
                 self.remote = remote;
-                self.phase = Phase::Ready { result, config };
+                self.config = config.clone();
+                // If shortfall, jump straight into measuring.
+                if let PreflightResult::Ready { report } = &result {
+                    if let SpaceStatus::Shortfall { free_bytes, .. } = report.space {
+                        if let Some(cfg) = config.clone() {
+                            self.phase = Phase::Measuring;
+                            return Task::perform(
+                                measure_sizes_blocking(cfg, free_bytes),
+                                |(sized, free)| Message::SizesMeasured(sized, free),
+                            );
+                        }
+                    }
+                }
+                self.phase = Phase::Ready { result };
                 Task::none()
             }
             Message::PowerOffToggled(value) => {
                 self.power_off = value;
                 Task::none()
             }
-            Message::StartBackup => {
-                if let Phase::Ready {
-                    config: Some(config),
-                    ..
-                } = &self.phase
+            Message::SizesMeasured(sized, free_bytes) => {
+                let checked = vec![false; sized.len()];
+                self.phase = Phase::Choosing {
+                    free_bytes,
+                    sized,
+                    checked,
+                };
+                Task::none()
+            }
+            Message::FolderToggled(index, value) => {
+                if let Phase::Choosing { checked, .. } = &mut self.phase {
+                    if let Some(slot) = checked.get_mut(index) {
+                        *slot = value;
+                    }
+                }
+                Task::none()
+            }
+            Message::AutoFill => {
+                if let Phase::Choosing {
+                    free_bytes,
+                    sized,
+                    checked,
+                } = &mut self.phase
                 {
+                    let selection = partial::select_smallest_first(sized, *free_bytes);
+                    // Mark checked = true for any source whose name is in the
+                    // auto-selected set.
+                    let chosen_names: Vec<&str> = selection
+                        .selected
+                        .iter()
+                        .map(|s| s.source.name.as_str())
+                        .collect();
+                    for (i, s) in sized.iter().enumerate() {
+                        checked[i] = chosen_names.contains(&s.source.name.as_str());
+                    }
+                }
+                Task::none()
+            }
+            Message::StartBackup => {
+                if let Some(config) = &self.config {
                     let config = config.clone();
                     self.phase = Phase::BackingUp;
-                    Task::perform(run_backup_blocking(config), Message::BackupFinished)
+                    Task::perform(run_full_backup_blocking(config), Message::BackupFinished)
                 } else {
                     Task::none()
                 }
             }
+            Message::StartPartial => {
+                // Gather the checked folders, confirm they fit, and launch.
+                if let Phase::Choosing {
+                    free_bytes,
+                    sized,
+                    checked,
+                } = &self.phase
+                {
+                    let chosen: Vec<SizedSource> = sized
+                        .iter()
+                        .zip(checked.iter())
+                        .filter(|(_, c)| **c)
+                        .map(|(s, _)| s.clone())
+                        .collect();
+
+                    // Safety: only proceed if it actually fits.
+                    match partial::validate_custom(&chosen, *free_bytes) {
+                        partial::CustomValidation::Fits { .. } if !chosen.is_empty() => {
+                            if let Some(config) = &self.config {
+                                let config = config.clone();
+                                self.phase = Phase::BackingUp;
+                                return Task::perform(
+                                    run_partial_backup_blocking(config, chosen),
+                                    Message::BackupFinished,
+                                );
+                            }
+                        }
+                        _ => {
+                            // Doesn't fit or empty: do nothing (button should
+                            // be disabled in this case anyway).
+                        }
+                    }
+                }
+                Task::none()
+            }
             Message::BackupFinished(outcome) => {
-                // If the user asked to power off AND the outcome is verified,
-                // attempt a clean shutdown. The permit can only be obtained
-                // from a verified outcome, so a failure cannot power off.
                 if self.power_off {
                     if let Some(permit) = outcome.power_off_permit() {
-                        if let Err(e) = poweroff::power_off(permit) {
-                            // Power-off failed (e.g. permissions): show it
-                            // instead of silently doing nothing.
+                        if let Err(e) = nightjar_core::poweroff::power_off(permit) {
                             self.phase = Phase::Finished(BackupOutcome::Failed(format!(
                                 "Backup succeeded, but power-off failed: {e}"
                             )));
                             return Task::none();
                         }
-                        // On success the machine is going down; nothing more
-                        // to display.
                     }
                 }
                 self.phase = Phase::Finished(outcome);
@@ -190,7 +308,7 @@ impl App {
             Phase::Checking => {
                 content = content.push(text("Checking your backup setup...").size(18));
             }
-            Phase::Ready { result, .. } => match result {
+            Phase::Ready { result } => match result {
                 PreflightResult::NoConfig(msg) => {
                     content = content
                         .push(text("No configuration found").size(22))
@@ -228,19 +346,11 @@ impl App {
                                 )
                                 .push(button(text("Back up now")).on_press(Message::StartBackup));
                         }
-                        SpaceStatus::Shortfall {
-                            free_bytes,
-                            needed_bytes,
-                        } => {
-                            content = content.push(
-                                text(format!(
-                                    "Shortfall — need {} but only {} free. \
-                                     Partial backup UI coming soon.",
-                                    human_bytes(*needed_bytes),
-                                    human_bytes(*free_bytes)
-                                ))
-                                .size(16),
-                            );
+                        SpaceStatus::Shortfall { .. } => {
+                            // Handled by the Measuring/Choosing phases; this
+                            // branch is not normally rendered.
+                            content = content
+                                .push(text("Not enough space — preparing options...").size(16));
                         }
                         SpaceStatus::Unknown => {
                             content = content
@@ -258,6 +368,65 @@ impl App {
                     }
                 }
             },
+            Phase::Measuring => {
+                content = content.push(text("Not enough space for everything.").size(18));
+                content = content.push(text("Measuring your folders...").size(16));
+            }
+            Phase::Choosing {
+                free_bytes,
+                sized,
+                checked,
+            } => {
+                let total = selected_total(sized, checked);
+                let fits = total <= *free_bytes;
+
+                content = content
+                    .push(text("Choose folders to back up").size(22))
+                    .push(text(format!("Free space: {}", human_bytes(*free_bytes))).size(14));
+
+                // One checkbox row per folder.
+                for (i, s) in sized.iter().enumerate() {
+                    let label = format!("{}  ({})", s.source.name, human_bytes(s.size_bytes));
+                    content = content.push(
+                        checkbox(checked[i])
+                            .label(label)
+                            .on_toggle(move |v| Message::FolderToggled(i, v)),
+                    );
+                }
+
+                // Running total + fit indicator.
+                let status_line = if fits {
+                    format!("Selected: {} — fits.", human_bytes(total))
+                } else {
+                    format!(
+                        "Selected: {} — over by {}.",
+                        human_bytes(total),
+                        human_bytes(total - *free_bytes)
+                    )
+                };
+                content = content.push(text(status_line).size(16));
+
+                content = content.push(
+                    checkbox(self.power_off)
+                        .label("Power off after a successful backup")
+                        .on_toggle(Message::PowerOffToggled),
+                );
+
+                // Auto-fill + Back up selected buttons.
+                let back_up_btn = if fits && total > 0 {
+                    button(text("Back up selected")).on_press(Message::StartPartial)
+                } else {
+                    // Disabled: no on_press.
+                    button(text("Back up selected"))
+                };
+                content = content.push(
+                    row![
+                        button(text("Auto-fill (smallest-first)")).on_press(Message::AutoFill),
+                        back_up_btn,
+                    ]
+                    .spacing(12),
+                );
+            }
             Phase::BackingUp => {
                 content = content.push(text("Backing up... please wait.").size(18));
             }
