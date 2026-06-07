@@ -78,6 +78,26 @@ pub fn run_partial_backup(config: &Config, selected: &[SizedSource]) -> BackupOu
     run_over_sources(&sources, config, false)
 }
 
+/// Copies and verifies a single source, for front-ends that drive the
+/// backup source-by-source (e.g. to show per-source progress).
+///
+/// Returns Ok(()) if this source both copied and verified; Err(message)
+/// naming the source and failing step otherwise. This reuses the exact same
+/// copy+verify path as the multi-source orchestrators, so behavior per
+/// source is identical.
+///
+/// IMPORTANT: a caller driving sources individually is responsible for
+/// replicating the orchestrator's contract — stop on the first Err, and
+/// only treat the run as verified if EVERY source returned Ok.
+pub fn backup_one_source(config: &Config, source: &Source) -> Result<(), String> {
+    copy_and_verify_one(
+        source,
+        &config.remote,
+        &config.destination_path,
+        &config.excludes,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -133,6 +153,22 @@ mod tests {
         assert!(
             outcome.power_off_permit().is_none(),
             "a failed backup must never permit power-off"
+        );
+    }
+
+    #[test]
+    fn backup_one_source_missing_yields_err() {
+        // A nonexistent source must Err (copy fails before needing a remote),
+        // mirroring the orchestrator's failure handling for one source.
+        let config = integration_config();
+        let source = Source {
+            name: "Ghost".to_string(),
+            path: PathBuf::from("/this/does/not/exist/at/all"),
+        };
+        let result = backup_one_source(&config, &source);
+        assert!(
+            result.is_err(),
+            "missing source must produce an error, got {result:?}"
         );
     }
 }
