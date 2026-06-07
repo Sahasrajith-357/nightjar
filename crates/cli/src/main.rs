@@ -8,6 +8,7 @@ use clap::{Parser, Subcommand};
 use nightjar_core::config::Config;
 use nightjar_core::config_io;
 use nightjar_core::preflight::{self, SpaceStatus};
+mod prompts;
 
 /// nightjar: a robust backup tool that runs while you sleep.
 #[derive(Parser, Debug)]
