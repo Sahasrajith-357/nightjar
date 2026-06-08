@@ -98,6 +98,34 @@ pub fn backup_one_source(config: &Config, source: &Source) -> Result<(), String>
     )
 }
 
+/// Like `backup_one_source`, but streams copy progress via `on_progress`
+/// (a fraction 0.0..=1.0 for the copy phase). Verification runs after the
+/// copy exactly as in the non-streaming path. Same contract: Ok only if the
+/// source both copied and verified; Err naming the failing step otherwise.
+///
+/// Progress is best-effort and display-only; it never affects the result.
+pub fn backup_one_source_streaming(
+    config: &Config,
+    source: &Source,
+    on_progress: impl FnMut(f32),
+) -> Result<(), String> {
+    // Copy with streaming progress.
+    rclone::copy_source_streaming(
+        source,
+        &config.remote,
+        &config.destination_path,
+        &config.excludes,
+        on_progress,
+    )
+    .map_err(|e| format!("copy of '{}' failed: {e}", source.name))?;
+
+    // Verify exactly as the non-streaming path does.
+    rclone::verify_source(source, &config.remote, &config.destination_path)
+        .map_err(|e| format!("verification of '{}' failed: {e}", source.name))?;
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
