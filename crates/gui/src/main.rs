@@ -56,6 +56,8 @@ enum PreflightResult {
 
 /// The app lifecycle, including the shortfall sub-states.
 enum Phase {
+    /// Sources changed; the previous preflight is stale. Shows Recalculate.
+    NeedsRecalc,
     Checking,
     Ready {
         result: PreflightResult,
@@ -111,6 +113,7 @@ enum Message {
     RecalcSize,
     BackToStart,
     Tick,
+    ApplyPreset,
 }
 
 fn boot() -> (App, Task<Message>) {
@@ -400,6 +403,43 @@ impl App {
                     Task::none()
                 }
             }
+            Message::ApplyPreset => {
+                self.notice = None;
+                if let Some(config) = &mut self.config {
+                    let mut added = 0usize;
+
+                    // Merge preset sources (skip duplicates by path or name).
+                    for src in nightjar_core::config::preset_sources() {
+                        let dup = config
+                            .sources
+                            .iter()
+                            .any(|s| s.path == src.path || s.name == src.name);
+                        if !dup {
+                            config.sources.push(src);
+                            added += 1;
+                        }
+                    }
+
+                    // Merge preset excludes (dedup).
+                    for pat in nightjar_core::config::preset_excludes() {
+                        if !config.excludes.contains(&pat) {
+                            config.excludes.push(pat);
+                        }
+                    }
+
+                    if let Ok(cfgpath) = config_io::config_path() {
+                        let _ = config_io::save_to(config, &cfgpath);
+                    }
+                    self.invalidate_after_edit();
+
+                    self.notice = Some(if added > 0 {
+                        format!("Added {added} common folder(s). Review the list, then back up.")
+                    } else {
+                        "Common folders are already in your list.".to_string()
+                    });
+                }
+                Task::none()
+            }
             Message::StartPartial => {
                 // Gather the checked folders, confirm they fit, and launch.
                 if let Phase::Choosing {
@@ -542,9 +582,7 @@ impl App {
                     }
 
                     if added > 0 {
-                        if let Ok(cfgpath) = config_io::config_path() {
-                            let _ = config_io::save_to(config, &cfgpath);
-                        }
+                        self.invalidate_after_edit();
                     }
                 }
 
@@ -573,7 +611,7 @@ impl App {
                             let _ = config_io::save_to(config, &cfgpath);
                         }
                         // Mark preflight stale; do NOT re-run it here (instant edit).
-                        self.preflight_stale = true;
+                        self.invalidate_after_edit();
                     }
                 }
                 Task::none()
@@ -723,13 +761,27 @@ impl App {
         let inner = container(list).padding(iced::Padding::default().right(16.0));
         let scrolled = scrollable(inner).height(Length::Fill);
 
-        let header_row = row![
-            text("Folders to back up").size(20),
-            space().width(Length::Fill),
+        let buttons = row![
+            button(text("Common folders")).on_press(Message::ApplyPreset),
             button(text("+ Add folders")).on_press(Message::AddFolderClicked),
         ]
-        .align_y(iced::Alignment::Center)
-        .spacing(12);
+        .spacing(10);
+
+        // Narrow windows: stack title above buttons so labels never overflow.
+        let header_row: Element<'_, Message> = if self.window_width >= 700.0 {
+            row![
+                text("Folders to back up").size(20),
+                space().width(Length::Fill),
+                buttons,
+            ]
+            .align_y(iced::Alignment::Center)
+            .spacing(12)
+            .into()
+        } else {
+            column![text("Folders to back up").size(20), buttons]
+                .spacing(8)
+                .into()
+        };
 
         let mut col = column![header_row, scrolled]
             .spacing(14)
@@ -769,6 +821,16 @@ impl App {
 
         let status: Element<'_, Message> = match &self.phase {
             Phase::Checking => text("Checking your backup setup...").size(16).into(),
+
+            Phase::NeedsRecalc => column![
+                text("Folders changed.").size(16),
+                text("Recalculate the backup size to continue.")
+                    .size(13)
+                    .color(Color::from_rgb8(0x9a, 0x8f, 0x95)),
+                button(text("Recalculate size")).on_press(Message::RecalcSize),
+            ]
+            .spacing(10)
+            .into(),
 
             Phase::Ready { result } => match result {
                 PreflightResult::NoConfig(msg) => column![
@@ -982,6 +1044,18 @@ impl App {
             Subscription::batch([resize, tick])
         } else {
             resize
+        }
+    }
+    /// After a source-list edit, invalidate any in-progress shortfall
+    /// decision so the user can recalculate with the new list.
+    fn invalidate_after_edit(&mut self) {
+        self.preflight_stale = true;
+        match self.phase {
+            // If mid-decision or measuring, drop back to a recalculable state.
+            Phase::Choosing { .. } | Phase::Measuring => {
+                self.phase = Phase::NeedsRecalc;
+            }
+            _ => {}
         }
     }
 }
