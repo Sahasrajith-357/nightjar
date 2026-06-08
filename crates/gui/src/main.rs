@@ -8,7 +8,8 @@
 
 use iced::time::{self, Duration};
 use iced::widget::{
-    button, checkbox, column, container, pick_list, progress_bar, row, scrollable, space, text,
+    button, canvas, checkbox, column, container, pick_list, progress_bar, row, scrollable, space,
+    stack, text,
 };
 use iced::{Color, Element, Font, Length, Size, Subscription, Task, Theme};
 use nightjar_core::backup;
@@ -23,6 +24,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 mod theme;
 use theme::Preset;
+mod motif;
 
 /// Embedded fonts (bundled in crates/gui/fonts/).
 const BLANKA_BYTES: &[u8] = include_bytes!("../fonts/Blanka-Regular.otf");
@@ -700,12 +702,26 @@ impl App {
             Message::ThemeSelected,
         );
 
-        container(
+        let foreground = container(
             column![title, motto, theme_picker]
                 .spacing(10)
                 .align_x(iced::Alignment::Center),
         )
+        .center_x(Length::Fill);
+
+        // The motif canvas sits behind the title, filling the masthead area.
+        let backdrop = canvas(motif::Motif {
+            accent: self.preset.accent(),
+        })
+        .width(Length::Fill)
+        .height(Length::Fixed(180.0));
+
+        container(stack![
+            container(backdrop).center_x(Length::Fill),
+            foreground,
+        ])
         .center_x(Length::Fill)
+        .height(Length::Fixed(180.0))
         .into()
     }
 
