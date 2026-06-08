@@ -2,6 +2,8 @@
 
 **A robust backup tool that runs while you sleep.**
 
+> 😴 **Allergic to documentation? ** → **[QUICKSTART.md](QUICKSTART.md)** — three commands and you're backing up.
+
 nightjar backs up your folders to the cloud, **verifies** every file arrived intact, and — only if you ask — powers the machine off afterward. It is built around a simple promise: it will never tell you a backup succeeded unless it actually did, and it will never power off your machine on a backup that wasn't fully verified.
 
 It wraps [rclone](https://rclone.org/) (which does the actual transfers and supports 70+ cloud providers) and adds a careful safety layer, a scriptable command-line tool, and a polished desktop interface.
@@ -281,6 +283,74 @@ cargo test -- --ignored
 # Build optimized binaries
 cargo build --release
 ```
+
+---
+
+## Scheduling backups
+
+nightjar doesn't need a built-in scheduler — Linux already has excellent ones.
+Because the command-line tool runs unattended and reports success/failure via
+exit codes, it's safe to run on a schedule. (If the network or cloud is
+unreachable at that time, it fails fast and does nothing — no hang, no harm.)
+
+### Option A — Automatic backups with a systemd timer (recommended)
+
+Run a backup automatically, e.g. every night. Create two files:
+
+`~/.config/systemd/user/nightjar.service`
+```ini
+[Unit]
+Description=nightjar backup
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/nightjar-cli backup -y --partial-method smallest-first
+```
+
+`~/.config/systemd/user/nightjar.timer`
+```ini
+[Unit]
+Description=Run nightjar backup on a schedule
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+```
+
+Then enable it:
+```sh
+systemctl --user daemon-reload
+systemctl --user enable --now nightjar.timer
+systemctl --user list-timers nightjar.timer   # confirm it's scheduled
+```
+
+Change `OnCalendar=daily` to `weekly`, `Mon *-*-* 02:00:00` (Mondays at 2am),
+or any [systemd calendar expression](https://www.freedesktop.org/software/systemd/man/systemd.time.html).
+(Adjust the `ExecStart` path to wherever your `nightjar-cli` binary lives.)
+
+> **Tip:** to add `--power-off`, the user must be allowed to power off
+> non-interactively; on most desktops this works out of the box.
+
+### Option B — Automatic backups with cron
+
+```sh
+crontab -e
+```
+Add a line — e.g. every day at 2am:
+
+### Option C — Just remind me (I'll run it myself)
+
+Prefer to stay in control? Schedule a desktop *notification* instead of an
+automatic backup. Add a cron entry that pops a reminder:
+
+```sh
+crontab -e
+```
+(`notify-send` is provided by `libnotify` — `sudo apt install libnotify-bin` if
+you don't have it.)
 
 ---
 
