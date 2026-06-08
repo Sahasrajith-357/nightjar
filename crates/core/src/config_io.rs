@@ -5,9 +5,9 @@
 //! fail returns `Result`, so callers must handle missing files, permission
 //! problems, and malformed TOML explicitly.
 
+use crate::Result;
 use crate::config::Config;
 use crate::error::Error;
-use crate::Result;
 use directories::ProjectDirs;
 use std::fs;
 use std::path::PathBuf;
@@ -90,6 +90,7 @@ mod tests {
             ],
             verify: true,
             excludes: vec!["**/.git/**".to_string()],
+            theme: None,
         };
 
         // Use a temp dir so we never touch the real config.

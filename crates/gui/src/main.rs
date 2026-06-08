@@ -6,7 +6,6 @@
 //! selected" action enabled only when the selection fits. Reuses the
 //! exhaustively-tested partial-selection logic.
 
-use iced::theme::Palette;
 use iced::time::{self, Duration};
 use iced::widget::{
     button, checkbox, column, container, pick_list, progress_bar, row, scrollable, space, text,
@@ -22,6 +21,8 @@ use nightjar_core::rclone;
 use nightjar_core::state::BackupOutcome;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+mod theme;
+use theme::Preset;
 
 /// Embedded fonts (bundled in crates/gui/fonts/).
 const BLANKA_BYTES: &[u8] = include_bytes!("../fonts/Blanka-Regular.otf");
@@ -30,22 +31,6 @@ const MONO_BYTES: &[u8] = include_bytes!("../fonts/JetBrainsMono-Regular.ttf");
 /// Font handles, keyed to each font's internal family name.
 const BLANKA: Font = Font::with_name("Blanka");
 const MONO: Font = Font::with_name("JetBrains Mono");
-
-/// nightjar's custom theme — a warm "ember" dark palette built from the
-/// coral keyboard color and a Death Note crimson accent.
-fn nightjar_theme() -> Theme {
-    Theme::custom(
-        "nightjar".to_string(),
-        Palette {
-            background: Color::from_rgb8(0x16, 0x13, 0x1a), // near-black ember charcoal
-            text: Color::from_rgb8(0xc9, 0xbf, 0xc4),       // warm grey
-            primary: Color::from_rgb8(0xeb, 0x96, 0x7c),    // coral (your keyboard)
-            success: Color::from_rgb8(0xeb, 0x96, 0x7c),    // coral (verified = warm, on-theme)
-            warning: Color::from_rgb8(0xd9, 0xa0, 0x5b),    // warm amber
-            danger: Color::from_rgb8(0x74, 0x19, 0x24),     // crimson (Death Note)
-        },
-    )
-}
 
 #[derive(Debug, Clone)]
 enum PreflightResult {
@@ -92,6 +77,7 @@ struct App {
     preflight_stale: bool,
     progress: Arc<Mutex<f32>>,
     displayed_progress: f32,
+    preset: Preset,
 }
 
 #[derive(Debug, Clone)]
@@ -114,6 +100,7 @@ enum Message {
     BackToStart,
     Tick,
     ApplyPreset,
+    ThemeSelected(Preset),
 }
 
 fn boot() -> (App, Task<Message>) {
@@ -128,6 +115,7 @@ fn boot() -> (App, Task<Message>) {
         preflight_stale: false,
         progress: Arc::new(Mutex::new(0.0)),
         displayed_progress: 0.0,
+        preset: Preset::Ember,
     };
     let task = Task::perform(
         run_preflight_blocking(),
@@ -290,6 +278,11 @@ impl App {
             Message::PreflightFinished(result, config, remote, remotes) => {
                 self.remote = remote;
                 self.config = config.clone();
+                if let Some(cfg) = &config {
+                    if let Some(name) = &cfg.theme {
+                        self.preset = Preset::from_name(name);
+                    }
+                }
                 self.remotes = remotes;
                 self.notice = None;
                 // If shortfall, jump straight into measuring.
@@ -657,6 +650,16 @@ impl App {
                 }
                 Task::none()
             }
+            Message::ThemeSelected(preset) => {
+                self.preset = preset;
+                if let Some(config) = &mut self.config {
+                    config.theme = Some(preset.name().to_string());
+                    if let Ok(cfgpath) = config_io::config_path() {
+                        let _ = config_io::save_to(config, &cfgpath);
+                    }
+                }
+                Task::none()
+            }
         }
     }
 
@@ -685,15 +688,21 @@ impl App {
         let title = text("NIGHTJAR")
             .font(BLANKA)
             .size(title_size)
-            .color(Color::from_rgb8(0xeb, 0x96, 0x7c));
+            .color(self.preset.accent());
 
-        let motto = text("I will back up your files while you sleep.")
+        let motto = text("A backup tool that runs while you sleep.")
             .size(16)
-            .color(Color::from_rgb8(0x9a, 0x8f, 0x95));
+            .color(self.preset.muted());
+
+        let theme_picker = pick_list(
+            Preset::ALL.to_vec(),
+            Some(self.preset),
+            Message::ThemeSelected,
+        );
 
         container(
-            column![title, motto]
-                .spacing(8)
+            column![title, motto, theme_picker]
+                .spacing(10)
                 .align_x(iced::Alignment::Center),
         )
         .center_x(Length::Fill)
@@ -859,7 +868,7 @@ impl App {
                             c = c.push(
                                 text(format!("Fits — {} free.", human_bytes(*free_bytes)))
                                     .size(15)
-                                    .color(Color::from_rgb8(0xeb, 0x96, 0x7c)),
+                                    .color(self.preset.accent()),
                             );
                         }
                         SpaceStatus::Shortfall { .. } => {
@@ -971,7 +980,7 @@ impl App {
         let status_line = if fits {
             text(format!("Selected: {} — fits.", human_bytes(total)))
                 .size(15)
-                .color(Color::from_rgb8(0xeb, 0x96, 0x7c))
+                .color(self.preset.accent())
         } else {
             text(format!(
                 "Selected: {} — over by {}.",
@@ -1032,7 +1041,7 @@ impl App {
     }
 
     fn theme(&self) -> Theme {
-        nightjar_theme()
+        self.preset.theme()
     }
 
     fn subscription(&self) -> Subscription<Message> {

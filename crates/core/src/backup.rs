@@ -140,6 +140,7 @@ mod tests {
             sources: vec![],
             verify: true,
             excludes: vec![],
+            theme: None,
         }
     }
 

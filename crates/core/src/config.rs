@@ -29,6 +29,9 @@ pub struct Config {
     /// (e.g. "**/node_modules/**", "**/.git/**").
     #[serde(default)]
     pub excludes: Vec<String>,
+
+    #[serde(default)]
+    pub theme: Option<String>,
 }
 
 /// A single local folder the user wants backed up.
