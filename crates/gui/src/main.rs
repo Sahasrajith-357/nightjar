@@ -7,8 +7,10 @@
 //! exhaustively-tested partial-selection logic.
 
 use iced::theme::Palette;
-use iced::widget::{button, checkbox, column, container, pick_list, progress_bar, row, text};
-use iced::{Color, Element, Font, Length, Task, Theme};
+use iced::widget::{
+    button, checkbox, column, container, pick_list, progress_bar, row, scrollable, space, text,
+};
+use iced::{Color, Element, Font, Length, Size, Subscription, Task, Theme};
 use nightjar_core::backup;
 use nightjar_core::config::Config;
 use nightjar_core::config::Source;
@@ -82,6 +84,8 @@ struct App {
     power_off: bool,
     remotes: Vec<String>,
     notice: Option<String>,
+    window_width: f32,
+    preflight_stale: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -99,6 +103,9 @@ enum Message {
     RemoveSource(PathBuf),
     /// One source finished backing up (Ok = copied+verified).
     SourceDone(Result<(), String>),
+    WindowResized(Size),
+    RecalcSize,
+    BackToStart,
 }
 
 fn boot() -> (App, Task<Message>) {
@@ -109,6 +116,8 @@ fn boot() -> (App, Task<Message>) {
         power_off: false,
         remotes: Vec::new(),
         notice: None,
+        window_width: 1200.0,
+        preflight_stale: false,
     };
     let task = Task::perform(
         run_preflight_blocking(),
@@ -333,6 +342,17 @@ impl App {
                 Task::none()
             }
             Message::StartBackup => {
+                // If the source set changed since last preflight, recompute first.
+                if self.preflight_stale {
+                    self.preflight_stale = false;
+                    self.phase = Phase::Checking;
+                    return Task::perform(
+                        run_preflight_blocking(),
+                        |(result, config, remote, remotes)| {
+                            Message::PreflightFinished(result, config, remote, remotes)
+                        },
+                    );
+                }
                 if let Some(config) = &self.config {
                     let config = config.clone();
                     let sources = config.sources.clone();
@@ -504,13 +524,7 @@ impl App {
                 }
 
                 if added > 0 {
-                    self.phase = Phase::Checking;
-                    return Task::perform(
-                        run_preflight_blocking(),
-                        |(result, config, remote, remotes)| {
-                            Message::PreflightFinished(result, config, remote, remotes)
-                        },
-                    );
+                    self.preflight_stale = true;
                 }
                 Task::none()
             }
@@ -523,209 +537,251 @@ impl App {
                         if let Ok(cfgpath) = config_io::config_path() {
                             let _ = config_io::save_to(config, &cfgpath);
                         }
-                        self.phase = Phase::Checking;
-                        return Task::perform(
-                            run_preflight_blocking(),
-                            |(result, config, remote, remotes)| {
-                                Message::PreflightFinished(result, config, remote, remotes)
-                            },
-                        );
+                        // Mark preflight stale; do NOT re-run it here (instant edit).
+                        self.preflight_stale = true;
                     }
                 }
                 Task::none()
+            }
+            Message::WindowResized(size) => {
+                self.window_width = size.width;
+                Task::none()
+            }
+            Message::RecalcSize => {
+                self.preflight_stale = false;
+                self.phase = Phase::Checking;
+                Task::perform(
+                    run_preflight_blocking(),
+                    |(result, config, remote, remotes)| {
+                        Message::PreflightFinished(result, config, remote, remotes)
+                    },
+                )
+            }
+            Message::BackToStart => {
+                self.phase = Phase::Checking;
+                Task::perform(
+                    run_preflight_blocking(),
+                    |(result, config, remote, remotes)| {
+                        Message::PreflightFinished(result, config, remote, remotes)
+                    },
+                )
             }
         }
     }
 
     fn view(&self) -> Element<'_, Message> {
+        let wide = self.window_width >= 900.0;
+
+        let shell = column![self.masthead(), self.body(wide), self.footer()]
+            .spacing(28)
+            .width(Length::Fill)
+            .height(Length::Fill);
+
+        // Constrain very wide windows to a comfortable band; fill otherwise.
+        // Fill the whole window with comfortable padding — versatile across
+        // resolutions, never stranded in a narrow centered band.
+        container(shell)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .padding(48)
+            .into()
+    }
+
+    /// Centered masthead: title top-center, motto below it.
+    fn masthead(&self) -> Element<'_, Message> {
+        // Scale the title to the window so it never clips on narrow windows.
+        let title_size = (self.window_width * 0.07).clamp(40.0, 110.0);
         let title = text("NIGHTJAR")
             .font(BLANKA)
-            .size(72)
+            .size(title_size)
             .color(Color::from_rgb8(0xeb, 0x96, 0x7c));
 
-        let tagline = text("A backup tool that runs while you sleep.")
-            .size(15)
+        let motto = text("I will back up your files while you sleep.")
+            .size(16)
             .color(Color::from_rgb8(0x9a, 0x8f, 0x95));
 
-        let mut content = column![title, tagline]
-            .spacing(8)
-            .align_x(iced::Alignment::Center);
-        // Remote selector (shown once remotes are known).
-        if !self.remotes.is_empty() {
-            let selected = if self.remote.is_empty() {
-                None
-            } else {
-                Some(self.remote.clone())
-            };
-            content = content.push(
-                row![
-                    text("Cloud remote:").size(14),
-                    pick_list(self.remotes.clone(), selected, Message::RemoteSelected),
-                ]
-                .spacing(10)
-                .align_y(iced::Alignment::Center),
-            );
-        }
-        // Source folder list + add button (shown once config is loaded).
+        container(
+            column![title, motto]
+                .spacing(8)
+                .align_x(iced::Alignment::Center),
+        )
+        .center_x(Length::Fill)
+        .into()
+    }
+
+    /// The body reflows: two columns when wide, stacked when narrow.
+    fn body(&self, wide: bool) -> Element<'_, Message> {
+        // Left: folder management. Right: status / action context.
+        let left = self.folder_panel();
+        let right = self.status_panel();
+
+        let layout: Element<'_, Message> = if wide {
+            row![
+                container(left).width(Length::FillPortion(1)),
+                container(right).width(Length::FillPortion(1)),
+            ]
+            .spacing(32)
+            .height(Length::Fill)
+            .into()
+        } else {
+            column![left, right].spacing(24).into()
+        };
+
+        container(layout)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into()
+    }
+
+    /// Left panel: the scrollable folder list + add button + remote selector.
+    fn folder_panel(&self) -> Element<'_, Message> {
+        let mut list = column![].spacing(10);
+
         if let Some(config) = &self.config {
-            let mut sources_col = column![text("Folders to back up:").size(14)].spacing(6);
             if config.sources.is_empty() {
-                sources_col = sources_col.push(
-                    text("No folders selected yet. Add folders to back up.")
-                        .size(13)
+                list = list.push(
+                    text("No folders selected yet.\nAdd folders to back up.")
+                        .size(15)
                         .color(Color::from_rgb8(0x9a, 0x8f, 0x95)),
                 );
             } else {
                 for s in &config.sources {
                     let path = s.path.clone();
-                    sources_col = sources_col.push(
+                    list = list.push(
                         row![
-                            text(format!("{}  ({})", s.name, s.path.display())).size(13),
-                            button(text("✕").size(12))
-                                .on_press(Message::RemoveSource(path)),
+                            column![
+                                text(s.name.clone()).size(16),
+                                text(s.path.display().to_string())
+                                    .size(12)
+                                    .color(Color::from_rgb8(0x9a, 0x8f, 0x95)),
+                            ]
+                            .spacing(2)
+                            .width(Length::Fill),
+                            button(text("✕").size(14)).on_press(Message::RemoveSource(path)),
                         ]
-                        .spacing(10)
+                        .spacing(12)
                         .align_y(iced::Alignment::Center),
                     );
                 }
             }
-            sources_col = sources_col
-                .push(button(text("+ Add folders")).on_press(Message::AddFolderClicked));
-            content = content.push(sources_col);
         }
 
-        // Notice (e.g. duplicate folder).
+        // Right-pad the inner content so the scrollbar never overlaps the ✕.
+        let inner = container(list).padding(iced::Padding::default().right(16.0));
+        let scrolled = scrollable(inner).height(Length::Fill);
+
+        let header_row = row![
+            text("Folders to back up").size(20),
+            space().width(Length::Fill),
+            button(text("+ Add folders")).on_press(Message::AddFolderClicked),
+        ]
+        .align_y(iced::Alignment::Center)
+        .spacing(12);
+
+        let mut col = column![header_row, scrolled]
+            .spacing(14)
+            .height(Length::Fill);
+
+        // Notice (duplicate folder, etc.)
         if let Some(notice) = &self.notice {
-            content = content.push(
+            col = col.push(
                 text(notice.clone())
                     .size(13)
                     .color(Color::from_rgb8(0xd9, 0xa0, 0x5b)),
             );
         }
 
-        match &self.phase {
-            Phase::Checking => {
-                content = content.push(text("Checking your backup setup...").size(18));
-            }
+        col.into()
+    }
+
+    /// Right panel: remote selector + status that depends on the phase.
+    fn status_panel(&self) -> Element<'_, Message> {
+        // Remote selector.
+        let remote_row: Element<'_, Message> = if self.remotes.is_empty() {
+            text("").into()
+        } else {
+            let selected = if self.remote.is_empty() {
+                None
+            } else {
+                Some(self.remote.clone())
+            };
+            row![
+                text("Cloud:").size(15),
+                pick_list(self.remotes.clone(), selected, Message::RemoteSelected),
+            ]
+            .spacing(10)
+            .align_y(iced::Alignment::Center)
+            .into()
+        };
+
+        let status: Element<'_, Message> = match &self.phase {
+            Phase::Checking => text("Checking your backup setup...").size(16).into(),
+
             Phase::Ready { result } => match result {
-                PreflightResult::NoConfig(msg) => {
-                    content = content
-                        .push(text("No configuration found").size(22))
-                        .push(text(msg.clone()).size(14));
-                }
-                PreflightResult::Failed(msg) => {
-                    content = content
-                        .push(text("Preflight failed").size(22))
-                        .push(text(msg.clone()).size(14));
-                }
+                PreflightResult::NoConfig(msg) => column![
+                    text("No configuration found").size(20),
+                    text(msg.clone()).size(13),
+                ]
+                .spacing(8)
+                .into(),
+                PreflightResult::Failed(msg) => column![
+                    text("Preflight failed").size(20),
+                    text(msg.clone()).size(13),
+                ]
+                .spacing(8)
+                .into(),
                 PreflightResult::Ready { report } => {
-                    content = content
-                        .push(text(format!("Remote: {}", self.remote)).size(18))
-                        .push(
-                            text(format!(
-                                "Backup size: {}",
-                                human_bytes(report.backup_size_bytes)
-                            ))
-                            .size(18),
-                        );
+                    let mut c = column![
+                        text(format!(
+                            "Backup size: {}",
+                            human_bytes(report.backup_size_bytes)
+                        ))
+                        .size(16),
+                    ]
+                    .spacing(8);
                     match &report.space {
                         SpaceStatus::Fits { free_bytes } => {
-                            content = content
-                                .push(
-                                    text(format!(
-                                        "Fits — {} free. Ready to back up.",
-                                        human_bytes(*free_bytes)
-                                    ))
-                                    .size(16),
-                                )
-                                .push(
-                                    checkbox(self.power_off)
-                                        .label("Power off after a successful backup")
-                                        .on_toggle(Message::PowerOffToggled),
-                                )
-                                .push(button(text("Back up now")).on_press(Message::StartBackup));
+                            c = c.push(
+                                text(format!("Fits — {} free.", human_bytes(*free_bytes)))
+                                    .size(15)
+                                    .color(Color::from_rgb8(0xeb, 0x96, 0x7c)),
+                            );
                         }
                         SpaceStatus::Shortfall { .. } => {
-                            // Handled by the Measuring/Choosing phases; this
-                            // branch is not normally rendered.
-                            content = content
-                                .push(text("Not enough space — preparing options...").size(16));
+                            c = c.push(text("Not enough space — preparing options...").size(15));
                         }
                         SpaceStatus::Unknown => {
-                            content = content
-                                .push(
-                                    text("Free space unknown — proceeding will attempt a full backup.")
-                                        .size(16),
-                                )
-                                .push(
-                                    checkbox(self.power_off)
-                                        .label("Power off after a successful backup")
-                                        .on_toggle(Message::PowerOffToggled),
-                                )
-                                .push(button(text("Back up now")).on_press(Message::StartBackup));
+                            c = c.push(
+                                text("Free space unknown — a full backup will be attempted.")
+                                    .size(15),
+                            );
                         }
                     }
+                    if self.preflight_stale {
+                        c = c.push(
+                            text("Folders changed — Recalculate size.")
+                                .size(12)
+                                .color(Color::from_rgb8(0xd9, 0xa0, 0x5b)),
+                        );
+                    }
+                    c = c.push(button(text("Recalculate size")).on_press(Message::RecalcSize));
+                    c.into()
                 }
             },
-            Phase::Measuring => {
-                content = content.push(text("Not enough space for everything.").size(18));
-                content = content.push(text("Measuring your folders...").size(16));
-            }
+
+            Phase::Measuring => column![
+                text("Not enough space for everything.").size(16),
+                text("Measuring your folders...").size(14),
+            ]
+            .spacing(8)
+            .into(),
+
             Phase::Choosing {
                 free_bytes,
                 sized,
                 checked,
-            } => {
-                let total = selected_total(sized, checked);
-                let fits = total <= *free_bytes;
+            } => self.choosing_body(*free_bytes, sized, checked),
 
-                content = content
-                    .push(text("Choose folders to back up").size(22))
-                    .push(text(format!("Free space: {}", human_bytes(*free_bytes))).size(14));
-
-                // One checkbox row per folder.
-                for (i, s) in sized.iter().enumerate() {
-                    let label = format!("{}  ({})", s.source.name, human_bytes(s.size_bytes));
-                    content = content.push(
-                        checkbox(checked[i])
-                            .label(label)
-                            .on_toggle(move |v| Message::FolderToggled(i, v)),
-                    );
-                }
-
-                // Running total + fit indicator.
-                let status_line = if fits {
-                    format!("Selected: {} — fits.", human_bytes(total))
-                } else {
-                    format!(
-                        "Selected: {} — over by {}.",
-                        human_bytes(total),
-                        human_bytes(total - *free_bytes)
-                    )
-                };
-                content = content.push(text(status_line).size(16));
-
-                content = content.push(
-                    checkbox(self.power_off)
-                        .label("Power off after a successful backup")
-                        .on_toggle(Message::PowerOffToggled),
-                );
-
-                // Auto-fill + Back up selected buttons.
-                let back_up_btn = if fits && total > 0 {
-                    button(text("Back up selected")).on_press(Message::StartPartial)
-                } else {
-                    // Disabled: no on_press.
-                    button(text("Back up selected"))
-                };
-                content = content.push(
-                    row![
-                        button(text("Auto-fill (smallest-first)")).on_press(Message::AutoFill),
-                        back_up_btn,
-                    ]
-                    .spacing(12),
-                );
-            }
             Phase::BackingUp {
                 sources,
                 done,
@@ -733,36 +789,134 @@ impl App {
             } => {
                 let total = sources.len() as f32;
                 let value = *done as f32;
-                content = content
-                    .push(text(format!("Backing up '{}'...", current)).size(18))
-                    .push(text(format!("{} of {} folders done", done, sources.len())).size(13))
-                    .push(progress_bar(0.0..=total, value).length(Length::Fixed(360.0)));
+                column![
+                    text(format!("Backing up '{current}'...")).size(18),
+                    text(format!("{} of {} folders done", done, sources.len())).size(14),
+                    progress_bar(0.0..=total, value).length(Length::Fill),
+                ]
+                .spacing(14)
+                .into()
             }
-            Phase::Finished(outcome) => match outcome {
-                BackupOutcome::FullVerified => {
-                    content = content.push(text("✓ Full backup completed and verified.").size(20));
-                }
-                BackupOutcome::PartialVerified => {
-                    content =
-                        content.push(text("✓ Partial backup completed and verified.").size(20));
-                }
-                BackupOutcome::Failed(msg) => {
-                    content = content
-                        .push(text("✗ Backup failed").size(20))
-                        .push(text(msg.clone()).size(14));
-                }
-            },
-        }
 
-        container(content.spacing(16).align_x(iced::Alignment::Center))
-            .center_x(Length::Fill)
-            .center_y(Length::Fill)
-            .padding(48)
-            .into()
+            Phase::Finished(outcome) => {
+                let summary: Element<'_, Message> = match outcome {
+                    BackupOutcome::FullVerified => text("✓ Full backup completed and verified.")
+                        .size(20)
+                        .into(),
+                    BackupOutcome::PartialVerified => {
+                        text("✓ Partial backup completed and verified.")
+                            .size(20)
+                            .into()
+                    }
+                    BackupOutcome::Failed(msg) => {
+                        column![text("✗ Backup failed").size(20), text(msg.clone()).size(13),]
+                            .spacing(8)
+                            .into()
+                    }
+                };
+                column![
+                    summary,
+                    button(text("Back to start")).on_press(Message::BackToStart),
+                ]
+                .spacing(16)
+                .into()
+            }
+        };
+
+        column![remote_row, status].spacing(20).into()
+    }
+
+    /// Partial-choosing content (lives in the status panel during Choosing).
+    fn choosing_body(
+        &self,
+        free_bytes: u64,
+        sized: &[SizedSource],
+        checked: &[bool],
+    ) -> Element<'_, Message> {
+        let total = selected_total(sized, checked);
+        let fits = total <= free_bytes;
+
+        let mut list = column![].spacing(8);
+        for (i, s) in sized.iter().enumerate() {
+            let label = format!("{}  ({})", s.source.name, human_bytes(s.size_bytes));
+            list = list.push(
+                checkbox(checked[i])
+                    .label(label)
+                    .on_toggle(move |v| Message::FolderToggled(i, v)),
+            );
+        }
+        let scrolled = scrollable(container(list).padding(iced::Padding::default().right(16.0)))
+            .height(Length::Fixed(220.0));
+
+        let status_line = if fits {
+            text(format!("Selected: {} — fits.", human_bytes(total)))
+                .size(15)
+                .color(Color::from_rgb8(0xeb, 0x96, 0x7c))
+        } else {
+            text(format!(
+                "Selected: {} — over by {}.",
+                human_bytes(total),
+                human_bytes(total - free_bytes)
+            ))
+            .size(15)
+            .color(Color::from_rgb8(0xd9, 0xa0, 0x5b))
+        };
+
+        let back_up_btn = if fits && total > 0 {
+            button(text("Back up selected")).on_press(Message::StartPartial)
+        } else {
+            button(text("Back up selected"))
+        };
+
+        column![
+            text(format!("Choose folders — {} free", human_bytes(free_bytes))).size(18),
+            scrolled,
+            status_line,
+            row![
+                button(text("Auto-fill (smallest-first)")).on_press(Message::AutoFill),
+                back_up_btn,
+            ]
+            .spacing(12),
+        ]
+        .spacing(14)
+        .into()
+    }
+
+    /// Fixed footer: power-off toggle (left) and primary action (right).
+    fn footer(&self) -> Element<'_, Message> {
+        let action: Element<'_, Message> = match &self.phase {
+            Phase::Ready {
+                result: PreflightResult::Ready { report },
+            } => match &report.space {
+                SpaceStatus::Fits { .. } | SpaceStatus::Unknown => {
+                    button(text("  Back up now  ").size(16))
+                        .on_press(Message::StartBackup)
+                        .into()
+                }
+                SpaceStatus::Shortfall { .. } => text("").into(),
+            },
+            _ => text("").into(),
+        };
+
+        let power = checkbox(self.power_off)
+            .label("Power off after a successful backup")
+            .on_toggle(Message::PowerOffToggled);
+
+        container(
+            row![power, space().width(Length::Fill), action]
+                .align_y(iced::Alignment::Center)
+                .spacing(16),
+        )
+        .width(Length::Fill)
+        .into()
     }
 
     fn theme(&self) -> Theme {
         nightjar_theme()
+    }
+
+    fn subscription(&self) -> Subscription<Message> {
+        iced::window::resize_events().map(|(_id, size)| Message::WindowResized(size))
     }
 }
 
@@ -770,6 +924,7 @@ fn main() -> iced::Result {
     iced::application(boot, App::update, App::view)
         .title("nightjar")
         .theme(App::theme)
+        .subscription(App::subscription)
         .font(BLANKA_BYTES)
         .font(MONO_BYTES)
         .default_font(MONO)
