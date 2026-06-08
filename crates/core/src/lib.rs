@@ -9,6 +9,7 @@ pub mod poweroff;
 pub mod preflight;
 pub mod rclone;
 pub mod state;
+pub mod tree;
 
 pub use config::Config;
 pub use error::Error;
