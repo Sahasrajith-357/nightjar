@@ -9,7 +9,7 @@
 use iced::time::{self, Duration};
 use iced::widget::{
     button, canvas, checkbox, column, container, pick_list, progress_bar, row, scrollable, space,
-    stack, text,
+    stack, svg, text,
 };
 use iced::{Color, Element, Font, Length, Size, Subscription, Task, Theme};
 use nightjar_core::backup;
@@ -33,6 +33,8 @@ const MONO_BYTES: &[u8] = include_bytes!("../fonts/JetBrainsMono-Regular.ttf");
 /// Font handles, keyed to each font's internal family name.
 const BLANKA: Font = Font::with_name("Blanka");
 const MONO: Font = Font::with_name("JetBrains Mono");
+
+const LOGO_SVG: &[u8] = include_bytes!("../assets/nightjar-logo.svg");
 
 // Spacing scale (consistent vertical/horizontal rhythm).
 const SP_XS: f32 = 6.0;
@@ -748,12 +750,34 @@ impl App {
             .size(title_size)
             .color(self.preset.accent());
 
+        // Logo scales with the title so the pairing stays proportional.
+        // Square source (1101x1098); size by height to match the title.
+        // SVG logo, tinted to the theme accent so the birds match the palette.
+        // Sized in stable buckets (not the continuously-changing title_size) to
+        // avoid re-layout flicker while resizing; SVG scales as vector cleanly.
+        let logo_px = if self.window_width >= 900.0 {
+            96.0
+        } else {
+            64.0
+        };
+        let accent = self.preset.accent();
+        let logo = svg(svg::Handle::from_memory(LOGO_SVG))
+            .width(Length::Fixed(logo_px))
+            .height(Length::Fixed(logo_px))
+            .style(move |_theme, _status| svg::Style {
+                color: Some(accent),
+            });
+
+        let title_row = row![logo, title]
+            .spacing(SP_MD)
+            .align_y(iced::Alignment::Center);
+
         let motto = text("A backup tool that runs while you sleep.")
             .size(16)
             .color(self.preset.muted());
 
         let foreground = container(
-            column![title, motto]
+            column![title_row, motto]
                 .spacing(SP_SM)
                 .align_x(iced::Alignment::Center),
         )
