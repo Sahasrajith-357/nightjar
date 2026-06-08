@@ -757,7 +757,10 @@ impl App {
                             ]
                             .spacing(2)
                             .width(Length::Fill),
-                            button(text("✕").size(14)).on_press(Message::RemoveSource(path)),
+                            button(text("✕").size(14))
+                                .padding([4, 10])
+                                .style(theme::remove_button(Color::from_rgb8(0xc9, 0xbf, 0xc4)))
+                                .on_press(Message::RemoveSource(path)),
                         ]
                         .spacing(12)
                         .align_y(iced::Alignment::Center),
@@ -767,12 +770,23 @@ impl App {
         }
 
         // Right-pad the inner content so the scrollbar never overlaps the ✕.
-        let inner = container(list).padding(iced::Padding::default().right(16.0));
-        let scrolled = scrollable(inner).height(Length::Fill);
+        let inner = container(list).padding(16.0);
+        let scrolled = container(scrollable(inner).height(Length::Fill))
+            .style(theme::panel(self.preset.surface()))
+            .padding(8.0)
+            .height(Length::Fill);
 
+        let accent = self.preset.accent();
+        let txt = Color::from_rgb8(0xc9, 0xbf, 0xc4);
         let buttons = row![
-            button(text("Common folders")).on_press(Message::ApplyPreset),
-            button(text("+ Add folders")).on_press(Message::AddFolderClicked),
+            button(text("Common folders"))
+                .padding([8, 16])
+                .style(theme::secondary_button(accent, txt))
+                .on_press(Message::ApplyPreset),
+            button(text("+ Add folders"))
+                .padding([8, 16])
+                .style(theme::secondary_button(accent, txt))
+                .on_press(Message::AddFolderClicked),
         ]
         .spacing(10);
 
@@ -952,7 +966,11 @@ impl App {
             }
         };
 
-        column![remote_row, status].spacing(20).into()
+        container(column![remote_row, status].spacing(20))
+            .style(theme::panel(self.preset.surface()))
+            .padding(20.0)
+            .width(Length::Fill)
+            .into()
     }
 
     /// Partial-choosing content (lives in the status panel during Choosing).
@@ -1018,7 +1036,9 @@ impl App {
                 result: PreflightResult::Ready { report },
             } => match &report.space {
                 SpaceStatus::Fits { .. } | SpaceStatus::Unknown => {
-                    button(text("  Back up now  ").size(16))
+                    button(text("Back up now").size(16))
+                        .padding([12, 28])
+                        .style(theme::primary_button(self.preset.accent()))
                         .on_press(Message::StartBackup)
                         .into()
                 }

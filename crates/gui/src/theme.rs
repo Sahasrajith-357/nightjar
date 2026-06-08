@@ -2,6 +2,8 @@
 //! iced derives the full extended palette (hover/press shades, etc.) from it.
 
 use iced::theme::Palette;
+use iced::widget::{button, container};
+use iced::{Background, Border};
 use iced::{Color, Theme};
 
 /// A named color preset.
@@ -100,10 +102,152 @@ impl Preset {
         };
         Theme::custom(format!("nightjar-{}", self.name()), palette)
     }
+
+    /// A surface color for cards/panels (slightly lifted from background).
+    pub fn surface(&self) -> Color {
+        match self {
+            Preset::Ember => Color::from_rgb8(0x20, 0x1b, 0x26),
+            Preset::Midnight => Color::from_rgb8(0x16, 0x1c, 0x28),
+            Preset::Mono => Color::from_rgb8(0x1e, 0x1e, 0x22),
+            Preset::Forest => Color::from_rgb8(0x18, 0x20, 0x1a),
+        }
+    }
 }
 
 impl std::fmt::Display for Preset {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.name())
+    }
+}
+
+/// Primary action button: filled accent, rounded, hover/press feedback.
+pub fn primary_button(accent: Color) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |_theme, status| {
+        let base = button::Style {
+            background: Some(Background::Color(accent)),
+            text_color: Color::from_rgb8(0x16, 0x13, 0x1a),
+            border: Border {
+                radius: 10.0.into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        match status {
+            button::Status::Hovered => button::Style {
+                background: Some(Background::Color(lighten(accent, 0.12))),
+                ..base
+            },
+            button::Status::Pressed => button::Style {
+                background: Some(Background::Color(darken(accent, 0.12))),
+                ..base
+            },
+            button::Status::Disabled => button::Style {
+                background: Some(Background::Color(with_alpha(accent, 0.35))),
+                text_color: with_alpha(Color::from_rgb8(0x16, 0x13, 0x1a), 0.5),
+                ..base
+            },
+            _ => base,
+        }
+    }
+}
+
+/// Secondary button: subtle outline, accent text, fills faintly on hover.
+pub fn secondary_button(
+    accent: Color,
+    text: Color,
+) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |_theme, status| {
+        let base = button::Style {
+            background: Some(Background::Color(Color::TRANSPARENT)),
+            text_color: text,
+            border: Border {
+                radius: 10.0.into(),
+                width: 1.0,
+                color: with_alpha(accent, 0.5),
+            },
+            ..Default::default()
+        };
+        match status {
+            button::Status::Hovered => button::Style {
+                background: Some(Background::Color(with_alpha(accent, 0.12))),
+                text_color: accent,
+                ..base
+            },
+            button::Status::Pressed => button::Style {
+                background: Some(Background::Color(with_alpha(accent, 0.20))),
+                ..base
+            },
+            button::Status::Disabled => button::Style {
+                text_color: with_alpha(text, 0.35),
+                border: Border {
+                    radius: 10.0.into(),
+                    width: 1.0,
+                    color: with_alpha(accent, 0.2),
+                },
+                ..base
+            },
+            _ => base,
+        }
+    }
+}
+
+/// Minimal remove (✕) button: faint, danger-tinted on hover.
+pub fn remove_button(text: Color) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |_theme, status| {
+        let base = button::Style {
+            background: Some(Background::Color(Color::TRANSPARENT)),
+            text_color: with_alpha(text, 0.6),
+            border: Border {
+                radius: 8.0.into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        match status {
+            button::Status::Hovered => button::Style {
+                background: Some(Background::Color(with_alpha(
+                    Color::from_rgb8(0xc8, 0x5e, 0x6e),
+                    0.18,
+                ))),
+                text_color: Color::from_rgb8(0xe0, 0x8a, 0x8a),
+                ..base
+            },
+            _ => base,
+        }
+    }
+}
+
+/// Subtle rounded panel/card background.
+pub fn panel(bg: Color) -> impl Fn(&Theme) -> container::Style {
+    move |_theme| container::Style {
+        background: Some(Background::Color(with_alpha(bg, 0.45))),
+        border: Border {
+            radius: 14.0.into(),
+            width: 1.0,
+            color: with_alpha(Color::WHITE, 0.04),
+        },
+        ..Default::default()
+    }
+}
+
+// --- small color helpers ---
+
+fn with_alpha(c: Color, a: f32) -> Color {
+    Color { a, ..c }
+}
+fn lighten(c: Color, amt: f32) -> Color {
+    Color {
+        r: (c.r + amt).min(1.0),
+        g: (c.g + amt).min(1.0),
+        b: (c.b + amt).min(1.0),
+        a: c.a,
+    }
+}
+fn darken(c: Color, amt: f32) -> Color {
+    Color {
+        r: (c.r - amt).max(0.0),
+        g: (c.g - amt).max(0.0),
+        b: (c.b - amt).max(0.0),
+        a: c.a,
     }
 }
