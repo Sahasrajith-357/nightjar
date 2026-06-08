@@ -44,6 +44,8 @@ enum PreflightResult {
 /// The app lifecycle, including the shortfall sub-states.
 enum Phase {
     /// Sources changed; the previous preflight is stale. Shows Recalculate.
+    /// /// The cloud-connect wizard screen.
+    ConnectCloud,
     NeedsRecalc,
     Checking,
     Ready {
@@ -84,6 +86,9 @@ struct App {
 
 #[derive(Debug, Clone)]
 enum Message {
+    OpenConnectCloud,
+    LaunchGuidedSetup,
+    RefreshRemotes,
     PreflightFinished(PreflightResult, Option<Config>, String, Vec<String>),
     RemoteSelected(String),
     PowerOffToggled(bool),
@@ -662,6 +667,37 @@ impl App {
                 }
                 Task::none()
             }
+            Message::OpenConnectCloud => {
+                self.notice = None;
+                self.phase = Phase::ConnectCloud;
+                Task::none()
+            }
+            Message::LaunchGuidedSetup => {
+                match rclone::launch_guided_setup() {
+                    Ok(()) => {
+                        self.notice = Some(
+                            "Setup opened in a terminal. Follow the prompts there, then click \
+                             'I've connected — refresh'."
+                                .to_string(),
+                        );
+                    }
+                    Err(e) => {
+                        self.notice = Some(format!("{e}"));
+                    }
+                }
+                Task::none()
+            }
+            Message::RefreshRemotes => {
+                // Re-scan remotes; return to the main flow showing the (possibly
+                // new) remote list. Re-runs preflight to refresh everything.
+                self.phase = Phase::Checking;
+                Task::perform(
+                    run_preflight_blocking(),
+                    |(result, config, remote, remotes)| {
+                        Message::PreflightFinished(result, config, remote, remotes)
+                    },
+                )
+            }
         }
     }
 
@@ -729,6 +765,10 @@ impl App {
         // Left: folder management. Right: status / action context.
         let left = self.folder_panel();
         let right = self.status_panel();
+
+        if let Phase::ConnectCloud = &self.phase {
+            return self.connect_cloud_view();
+        }
 
         let layout: Element<'_, Message> = if wide {
             row![
@@ -820,7 +860,7 @@ impl App {
         // Narrow windows: stack title above buttons so labels never overflow.
         let header_row: Element<'_, Message> = if self.window_width >= 700.0 {
             row![
-                text("Folders to back up")
+                text("FOLDERS TO BACK UP")
                     .size(20)
                     .color(self.preset.accent()),
                 space().width(Length::Fill),
@@ -855,16 +895,31 @@ impl App {
     fn status_panel(&self) -> Element<'_, Message> {
         // Remote selector.
         let remote_row: Element<'_, Message> = if self.remotes.is_empty() {
-            text("").into()
-        } else {
-            let selected = if self.remote.is_empty() {
-                None
-            } else {
-                Some(self.remote.clone())
-            };
             row![
-                text("Cloud:").size(15),
+                text("No cloud connected.").size(15),
+                button(text("+ Connect a cloud account").size(13))
+                    .padding([6, 14])
+                    .style(theme::secondary_button(
+                        self.preset.accent(),
+                        Color::from_rgb8(0xc9, 0xbf, 0xc4),
+                    ))
+                    .on_press(Message::OpenConnectCloud),
+            ]
+            .spacing(10)
+            .align_y(iced::Alignment::Center)
+            .into()
+        } else {
+            let selected = Some(self.remote.clone());
+            row![
+                text("CLOUD:").size(15),
                 pick_list(self.remotes.clone(), selected, Message::RemoteSelected),
+                button(text("+ CONNECT").size(13))
+                    .padding([6, 14])
+                    .style(theme::secondary_button(
+                        self.preset.accent(),
+                        Color::from_rgb8(0xc9, 0xbf, 0xc4),
+                    ))
+                    .on_press(Message::OpenConnectCloud),
             ]
             .spacing(10)
             .align_y(iced::Alignment::Center)
@@ -873,13 +928,13 @@ impl App {
 
         let status: Element<'_, Message> = match &self.phase {
             Phase::Checking => text("Checking your backup setup...").size(16).into(),
-
+            Phase::ConnectCloud => text("").into(),
             Phase::NeedsRecalc => column![
                 text("Folders changed.").size(16),
                 text("Recalculate the backup size to continue.")
                     .size(13)
                     .color(Color::from_rgb8(0x9a, 0x8f, 0x95)),
-                button(text("Recalculate size")).on_press(Message::RecalcSize),
+                button(text("RECALCULATE SIZE")).on_press(Message::RecalcSize),
             ]
             .spacing(10)
             .into(),
@@ -931,7 +986,7 @@ impl App {
                                 .color(Color::from_rgb8(0xd9, 0xa0, 0x5b)),
                         );
                     }
-                    c = c.push(button(text("Recalculate size")).on_press(Message::RecalcSize));
+                    c = c.push(button(text("RECALCULATE SIZE")).on_press(Message::RecalcSize));
                     c.into()
                 }
             },
@@ -1025,12 +1080,12 @@ impl App {
             .height(Length::Fixed(220.0));
 
         let status_line = if fits {
-            text(format!("Selected: {} — fits.", human_bytes(total)))
+            text(format!("SELECTED: {} — fits.", human_bytes(total)))
                 .size(15)
                 .color(self.preset.accent())
         } else {
             text(format!(
-                "Selected: {} — over by {}.",
+                "SELECTED: {} — over by {}.",
                 human_bytes(total),
                 human_bytes(total - free_bytes)
             ))
@@ -1039,23 +1094,89 @@ impl App {
         };
 
         let back_up_btn = if fits && total > 0 {
-            button(text("Back up selected")).on_press(Message::StartPartial)
+            button(text("BACK UP SELECTED")).on_press(Message::StartPartial)
         } else {
-            button(text("Back up selected"))
+            button(text("BACK UP SELECTED"))
         };
 
         column![
-            text(format!("Choose folders — {} free", human_bytes(free_bytes))).size(18),
+            text(format!("CHOOSE FOLDERS — {} FREE", human_bytes(free_bytes))).size(18),
             scrolled,
             status_line,
             row![
-                button(text("Auto-fill (smallest-first)")).on_press(Message::AutoFill),
+                button(text("AUTO-FILL (smallest-first)")).on_press(Message::AutoFill),
                 back_up_btn,
             ]
             .spacing(12),
         ]
         .spacing(14)
         .into()
+    }
+    fn connect_cloud_view(&self) -> Element<'_, Message> {
+        let accent = self.preset.accent();
+        let txt = Color::from_rgb8(0xc9, 0xbf, 0xc4);
+
+        let steps = column![
+            text("Connect a cloud account").size(24).color(accent),
+            text(
+                "nightjar uses rclone to talk to your cloud storage. This will open \
+                  rclone's guided setup in a terminal window."
+            )
+            .size(14),
+            text("1.  Click \"Run guided setup\" below — a terminal will open.").size(14),
+            text(
+                "2.  Choose a name (e.g. \"cloud\"), then pick your provider \
+                  (Google Drive, OneDrive, Dropbox, …)."
+            )
+            .size(14),
+            text(
+                "3.  When asked to use a web browser to authenticate, choose Yes — \
+                  your browser opens; sign in and allow access."
+            )
+            .size(14),
+            text(
+                "4.  When rclone says the remote is configured, return here and click \
+                  \"I've connected — refresh\"."
+            )
+            .size(14),
+        ]
+        .spacing(12);
+
+        let actions = row![
+            button(text("Run guided setup").size(15))
+                .padding([10, 22])
+                .style(theme::primary_button(accent))
+                .on_press(Message::LaunchGuidedSetup),
+            button(text("I've connected — refresh").size(15))
+                .padding([10, 22])
+                .style(theme::secondary_button(accent, txt))
+                .on_press(Message::RefreshRemotes),
+        ]
+        .spacing(12);
+
+        let mut col = column![steps, actions].spacing(24);
+
+        if let Some(notice) = &self.notice {
+            col = col.push(
+                text(notice.clone())
+                    .size(13)
+                    .color(Color::from_rgb8(0xd9, 0xa0, 0x5b)),
+            );
+        }
+
+        // A back link in case they want to return without connecting.
+        col = col.push(
+            button(text("← Back").size(14))
+                .padding([8, 16])
+                .style(theme::secondary_button(accent, txt))
+                .on_press(Message::RefreshRemotes),
+        );
+
+        container(col)
+            .style(theme::panel(self.preset.surface()))
+            .padding(28.0)
+            .width(Length::Fill)
+            .into()
     }
 
     /// Fixed footer: power-off toggle (left) and primary action (right).
@@ -1065,7 +1186,7 @@ impl App {
                 result: PreflightResult::Ready { report },
             } => match &report.space {
                 SpaceStatus::Fits { .. } | SpaceStatus::Unknown => {
-                    button(text("Back up now").size(16))
+                    button(text("BACK UP NOW").size(16))
                         .padding([12, 28])
                         .style(theme::primary_button(self.preset.accent()))
                         .on_press(Message::StartBackup)
@@ -1077,7 +1198,7 @@ impl App {
         };
 
         let power = checkbox(self.power_off)
-            .label("Power off after a successful backup")
+            .label("POWER OFF AFTER BACKUP")
             .on_toggle(Message::PowerOffToggled);
 
         container(

@@ -460,6 +460,65 @@ pub fn copy_source_streaming(
     }
 }
 
+/// Launches rclone's own interactive configuration wizard in a terminal
+/// emulator, so the user can connect a cloud account using rclone's proven
+/// setup (browser OAuth and all). We deliberately do NOT drive rclone's
+/// config ourselves — rclone manages its own config file, eliminating any
+/// risk of corrupting existing remotes.
+///
+/// Tries a sequence of common terminal emulators and uses the first found.
+/// Returns Ok(()) if a terminal was launched, or an error describing that
+/// none could be found.
+pub fn launch_guided_setup() -> Result<()> {
+    // The command we want the terminal to run: rclone config, then keep the
+    // window open so the user can read the outcome.
+    let inner = "echo '--- nightjar: connect a cloud account ---'; \
+                 echo 'Follow rclone'\\''s prompts. Your browser will open to sign in.'; \
+                 echo; rclone config; echo; \
+                 echo 'Setup finished. You can close this window and return to nightjar.'; \
+                 exec bash";
+
+    // Candidate terminal emulators: (program, args-before-command).
+    // Each entry runs: <program> <args...> bash -c "<inner>"
+    let candidates: [(&str, &[&str]); 6] = [
+        ("x-terminal-emulator", &["-e"]),
+        ("gnome-terminal", &["--"]),
+        ("konsole", &["-e"]),
+        ("xfce4-terminal", &["-e"]),
+        ("xterm", &["-e"]),
+        ("kitty", &[]),
+    ];
+
+    for (term, pre_args) in candidates {
+        // Check the terminal exists on PATH.
+        let exists = std::process::Command::new("which")
+            .arg(term)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !exists {
+            continue;
+        }
+
+        let mut cmd = std::process::Command::new(term);
+        cmd.args(pre_args);
+        cmd.arg("bash").arg("-c").arg(inner);
+
+        match cmd.spawn() {
+            Ok(_) => return Ok(()),
+            Err(_) => continue,
+        }
+    }
+
+    Err(Error::ConfigError(
+        "Could not find a terminal emulator to launch rclone setup. \
+         Please open a terminal yourself and run: rclone config"
+            .to_string(),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
