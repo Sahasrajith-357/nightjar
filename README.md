@@ -1,4 +1,4 @@
-# nightjar
+# NIGHTJAR
 
 **A robust backup tool that runs while you sleep.**
 
