@@ -34,6 +34,13 @@ const MONO_BYTES: &[u8] = include_bytes!("../fonts/JetBrainsMono-Regular.ttf");
 const BLANKA: Font = Font::with_name("Blanka");
 const MONO: Font = Font::with_name("JetBrains Mono");
 
+// Spacing scale (consistent vertical/horizontal rhythm).
+const SP_XS: f32 = 6.0;
+const SP_SM: f32 = 12.0;
+const SP_MD: f32 = 20.0;
+const SP_LG: f32 = 32.0;
+const SP_XL: f32 = 48.0;
+
 #[derive(Debug, Clone)]
 enum PreflightResult {
     NoConfig(String),
@@ -702,25 +709,33 @@ impl App {
     }
 
     fn view(&self) -> Element<'_, Message> {
-        let wide = self.window_width >= 900.0;
+        let w = self.window_width;
+        let wide = w >= 900.0;
+
+        // Outer padding scales gently with width so narrow windows aren't
+        // wasted on margins and wide ones aren't cramped to the edge.
+        let pad = if w < 600.0 {
+            SP_MD
+        } else if w < 1100.0 {
+            SP_LG
+        } else {
+            SP_XL
+        };
 
         let shell = column![
             self.masthead(),
             self.theme_bar(),
             self.body(wide),
-            self.footer()
+            self.footer(),
         ]
-        .spacing(28)
+        .spacing(SP_LG)
         .width(Length::Fill)
         .height(Length::Fill);
 
-        // Constrain very wide windows to a comfortable band; fill otherwise.
-        // Fill the whole window with comfortable padding — versatile across
-        // resolutions, never stranded in a narrow centered band.
         container(shell)
             .width(Length::Fill)
             .height(Length::Fill)
-            .padding(48)
+            .padding(pad)
             .into()
     }
 
@@ -739,7 +754,7 @@ impl App {
 
         let foreground = container(
             column![title, motto]
-                .spacing(10)
+                .spacing(SP_SM)
                 .align_x(iced::Alignment::Center),
         )
         .center_x(Length::Fill);
@@ -762,24 +777,33 @@ impl App {
 
     /// The body reflows: two columns when wide, stacked when narrow.
     fn body(&self, wide: bool) -> Element<'_, Message> {
-        // Left: folder management. Right: status / action context.
-        let left = self.folder_panel();
-        let right = self.status_panel();
-
+        // The cloud-connect wizard takes over the whole body.
         if let Phase::ConnectCloud = &self.phase {
             return self.connect_cloud_view();
         }
 
+        let folders = self.folder_panel();
+        let status = self.status_panel();
+
         let layout: Element<'_, Message> = if wide {
+            // Two purposeful columns: folders take more room than status.
             row![
-                container(left).width(Length::FillPortion(1)),
-                container(right).width(Length::FillPortion(1)),
+                container(folders)
+                    .width(Length::FillPortion(3))
+                    .height(Length::Fill),
+                container(status)
+                    .width(Length::FillPortion(2))
+                    .height(Length::Fill),
             ]
-            .spacing(32)
+            .spacing(SP_LG)
             .height(Length::Fill)
             .into()
         } else {
-            column![left, right].spacing(24).into()
+            // Single calm column when narrow.
+            column![folders, status]
+                .spacing(SP_MD)
+                .height(Length::Fill)
+                .into()
         };
 
         container(layout)
@@ -790,212 +814,214 @@ impl App {
 
     /// Left panel: the scrollable folder list + add button + remote selector.
     fn folder_panel(&self) -> Element<'_, Message> {
-        let mut list = column![].spacing(10);
+        let accent = self.preset.accent();
+        let txt = Color::from_rgb8(0xc9, 0xbf, 0xc4);
 
+        // Header: title grows, buttons stay natural width and wrap below when
+        // the window is narrow — so labels never overflow their outlines.
+        let title = text("Folders to back up").size(20);
+        let add_buttons = row![
+            button(
+                text("Common folders")
+                    .size(14)
+                    .wrapping(text::Wrapping::None)
+            )
+            .padding([SP_XS, SP_SM])
+            .style(theme::secondary_button(accent, txt))
+            .on_press(Message::ApplyPreset),
+            button(text("Add folders").size(14).wrapping(text::Wrapping::None))
+                .padding([SP_XS, SP_SM])
+                .style(theme::secondary_button(accent, txt))
+                .on_press(Message::AddFolderClicked),
+        ]
+        .spacing(SP_SM)
+        .width(Length::Shrink);
+
+        // Below a threshold, stack title over buttons (no horizontal overflow).
+        let header: Element<'_, Message> = if self.window_width >= 720.0 {
+            row![title, space().width(Length::Fill), add_buttons]
+                .align_y(iced::Alignment::Center)
+                .spacing(SP_SM)
+                .into()
+        } else {
+            column![title, add_buttons].spacing(SP_SM).into()
+        };
+
+        // The list of sources.
+        let mut list = column![].spacing(SP_SM);
         if let Some(config) = &self.config {
             if config.sources.is_empty() {
                 list = list.push(
-                    text("No folders selected yet.\nAdd folders to back up.")
-                        .size(15)
+                    text("No folders selected yet. Use “Add folders” or “Common folders”.")
+                        .size(14)
                         .color(self.preset.muted()),
                 );
             } else {
                 for s in &config.sources {
                     let path = s.path.clone();
+                    // ONE grower per row: the name/path column fills and
+                    // truncates; the ✕ button stays fixed. Row can't overflow.
+                    let info = column![
+                        text(s.name.clone()).size(15),
+                        text(s.path.display().to_string())
+                            .size(12)
+                            .color(self.preset.muted())
+                            .wrapping(text::Wrapping::None),
+                    ]
+                    .spacing(2)
+                    .width(Length::Fill)
+                    .clip(true);
+
                     list = list.push(
                         row![
-                            column![
-                                text(s.name.clone()).size(16),
-                                text(s.path.display().to_string())
-                                    .size(12)
-                                    .color(Color::from_rgb8(0x9a, 0x8f, 0x95)),
-                            ]
-                            .spacing(2)
-                            .width(Length::Fill),
+                            info,
                             button(text("✕").size(14))
                                 .padding([4, 10])
-                                .style(theme::remove_button(Color::from_rgb8(0xc9, 0xbf, 0xc4)))
+                                .style(theme::remove_button(txt))
                                 .on_press(Message::RemoveSource(path)),
                         ]
-                        .spacing(12)
+                        .spacing(SP_SM)
                         .align_y(iced::Alignment::Center),
                     );
                 }
             }
         }
 
-        // Right-pad the inner content so the scrollbar never overlaps the ✕.
-        let inner = container(list).padding(16.0);
-        let scrolled = container(scrollable(inner).height(Length::Fill))
+        let scroll = scrollable(container(list).padding(iced::Padding::default().right(SP_MD)))
+            .height(Length::Fill);
+
+        let inner = column![header, scroll].spacing(SP_MD).height(Length::Fill);
+
+        container(inner)
             .style(theme::panel(self.preset.surface()))
-            .padding(8.0)
-            .height(Length::Fill);
-
-        let accent = self.preset.accent();
-        let txt = Color::from_rgb8(0xc9, 0xbf, 0xc4);
-        let buttons = row![
-            button(
-                container(text("COMMON FOLDERS").size(14))
-                    .center_x(Length::Fill)
-                    .center_y(Length::Fill),
-            )
-            .width(Length::Fixed(148.0))
-            .height(Length::Fixed(36.0))
-            .padding([0, 12])
-            .style(theme::secondary_button(accent, txt))
-            .on_press(Message::ApplyPreset),
-            button(
-                container(text("ADD FOLDERS").size(14))
-                    .center_x(Length::Fill)
-                    .center_y(Length::Fill),
-            )
-            .width(Length::Fixed(130.0))
-            .height(Length::Fixed(36.0))
-            .padding([0, 12])
-            .style(theme::secondary_button(accent, txt))
-            .on_press(Message::AddFolderClicked),
-        ]
-        .spacing(10);
-
-        // Narrow windows: stack title above buttons so labels never overflow.
-        let header_row: Element<'_, Message> = if self.window_width >= 700.0 {
-            row![
-                text("FOLDERS TO BACK UP")
-                    .size(20)
-                    .color(self.preset.accent()),
-                space().width(Length::Fill),
-                buttons,
-            ]
-            .align_y(iced::Alignment::Center)
-            .spacing(12)
+            .padding(SP_MD)
+            .height(Length::Fill)
             .into()
-        } else {
-            column![text("Folders to back up").size(20), buttons]
-                .spacing(8)
-                .into()
-        };
-
-        let mut col = column![header_row, scrolled]
-            .spacing(14)
-            .height(Length::Fill);
-
-        // Notice (duplicate folder, etc.)
-        if let Some(notice) = &self.notice {
-            col = col.push(
-                text(notice.clone())
-                    .size(13)
-                    .color(Color::from_rgb8(0xd9, 0xa0, 0x5b)),
-            );
-        }
-
-        col.into()
     }
-
     /// Right panel: remote selector + status that depends on the phase.
     fn status_panel(&self) -> Element<'_, Message> {
-        // Remote selector.
+        let accent = self.preset.accent();
+        let txt = Color::from_rgb8(0xc9, 0xbf, 0xc4);
+        let muted = self.preset.muted();
+
+        // Remote selector — one grower (the picker) so the row never overflows.
         let remote_row: Element<'_, Message> = if self.remotes.is_empty() {
             row![
-                text("No cloud connected.").size(15),
-                button(text("+ Connect a cloud account").size(13))
-                    .padding([6, 14])
-                    .style(theme::secondary_button(
-                        self.preset.accent(),
-                        Color::from_rgb8(0xc9, 0xbf, 0xc4),
-                    ))
+                text("No cloud connected").size(15).width(Length::Fill),
+                button(text("Connect").size(13).wrapping(text::Wrapping::None))
+                    .padding([SP_XS, SP_SM])
+                    .style(theme::secondary_button(accent, txt))
                     .on_press(Message::OpenConnectCloud),
             ]
-            .spacing(10)
+            .spacing(SP_SM)
             .align_y(iced::Alignment::Center)
             .into()
         } else {
             let selected = Some(self.remote.clone());
             row![
-                text("CLOUD:").size(15),
-                pick_list(self.remotes.clone(), selected, Message::RemoteSelected),
-                button(text("+ CONNECT").size(13))
-                    .padding([6, 14])
-                    .style(theme::secondary_button(
-                        self.preset.accent(),
-                        Color::from_rgb8(0xc9, 0xbf, 0xc4),
-                    ))
+                text("Cloud").size(14).color(muted),
+                pick_list(self.remotes.clone(), selected, Message::RemoteSelected)
+                    .width(Length::Fill),
+                button(text("Connect").size(13).wrapping(text::Wrapping::None))
+                    .padding([SP_XS, SP_SM])
+                    .style(theme::secondary_button(accent, txt))
                     .on_press(Message::OpenConnectCloud),
             ]
-            .spacing(10)
+            .spacing(SP_SM)
             .align_y(iced::Alignment::Center)
             .into()
         };
 
+        let recalc_btn = || {
+            button(
+                text("Recalculate size")
+                    .size(14)
+                    .wrapping(text::Wrapping::None),
+            )
+            .padding([SP_XS, SP_SM])
+            .style(theme::secondary_button(accent, txt))
+            .on_press(Message::RecalcSize)
+        };
+
         let status: Element<'_, Message> = match &self.phase {
-            Phase::Checking => text("Checking your backup setup...").size(16).into(),
+            Phase::Checking => text("Checking your backup setup…")
+                .size(16)
+                .color(muted)
+                .into(),
             Phase::ConnectCloud => text("").into(),
+
             Phase::NeedsRecalc => column![
-                text("Folders changed.").size(16),
+                text("Folders changed").size(18),
                 text("Recalculate the backup size to continue.")
                     .size(13)
-                    .color(Color::from_rgb8(0x9a, 0x8f, 0x95)),
-                button(text("RECALCULATE SIZE")).on_press(Message::RecalcSize),
+                    .color(muted),
+                recalc_btn(),
             ]
-            .spacing(10)
+            .spacing(SP_SM)
             .into(),
 
             Phase::Ready { result } => match result {
                 PreflightResult::NoConfig(msg) => column![
-                    text("No configuration found").size(20),
-                    text(msg.clone()).size(13),
+                    text("No configuration found").size(18),
+                    text(msg.clone()).size(13).color(muted),
                 ]
-                .spacing(8)
+                .spacing(SP_SM)
                 .into(),
                 PreflightResult::Failed(msg) => column![
-                    text("Preflight failed").size(20),
-                    text(msg.clone()).size(13),
+                    text("Preflight failed").size(18),
+                    text(msg.clone()).size(13).color(muted),
                 ]
-                .spacing(8)
+                .spacing(SP_SM)
                 .into(),
                 PreflightResult::Ready { report } => {
                     let mut c = column![
                         text(format!(
-                            "Backup size: {}",
+                            "Backup size  {}",
                             human_bytes(report.backup_size_bytes)
                         ))
                         .size(16),
                     ]
-                    .spacing(8);
+                    .spacing(SP_SM);
                     match &report.space {
                         SpaceStatus::Fits { free_bytes } => {
                             c = c.push(
-                                text(format!("Fits — {} free.", human_bytes(*free_bytes)))
-                                    .size(15)
-                                    .color(self.preset.accent()),
+                                text(format!("Fits — {} free", human_bytes(*free_bytes)))
+                                    .size(14)
+                                    .color(accent),
                             );
                         }
                         SpaceStatus::Shortfall { .. } => {
-                            c = c.push(text("Not enough space — preparing options...").size(15));
+                            c = c.push(
+                                text("Not enough space — preparing options…")
+                                    .size(14)
+                                    .color(muted),
+                            );
                         }
                         SpaceStatus::Unknown => {
                             c = c.push(
                                 text("Free space unknown — a full backup will be attempted.")
-                                    .size(15),
+                                    .size(14)
+                                    .color(muted),
                             );
                         }
                     }
                     if self.preflight_stale {
                         c = c.push(
-                            text("Folders changed — Recalculate size.")
+                            text("Folders changed — recalculate.")
                                 .size(12)
                                 .color(Color::from_rgb8(0xd9, 0xa0, 0x5b)),
                         );
                     }
-                    c = c.push(button(text("RECALCULATE SIZE")).on_press(Message::RecalcSize));
+                    c = c.push(recalc_btn());
                     c.into()
                 }
             },
 
             Phase::Measuring => column![
-                text("Not enough space for everything.").size(16),
-                text("Measuring your folders...").size(14),
+                text("Not enough space for everything").size(16),
+                text("Measuring your folders…").size(14).color(muted),
             ]
-            .spacing(8)
+            .spacing(SP_SM)
             .into(),
 
             Phase::Choosing {
@@ -1011,49 +1037,61 @@ impl App {
             } => {
                 let pct = (self.displayed_progress * 100.0).clamp(0.0, 100.0);
                 column![
-                    text(format!("Backing up '{current}'...")).size(18),
+                    text(format!("Backing up “{current}”")).size(18),
                     text(format!(
-                        "{} of {} folders — {:.0}%",
+                        "{} of {} folders · {:.0}%",
                         done,
                         sources.len(),
                         pct
                     ))
-                    .size(14),
+                    .size(13)
+                    .color(muted),
                     progress_bar(0.0..=1.0, self.displayed_progress).length(Length::Fill),
                 ]
-                .spacing(14)
+                .spacing(SP_SM)
                 .into()
             }
 
             Phase::Finished(outcome) => {
                 let summary: Element<'_, Message> = match outcome {
-                    BackupOutcome::FullVerified => text("✓ Full backup completed and verified.")
-                        .size(20)
+                    BackupOutcome::FullVerified => text("✓  Full backup completed and verified")
+                        .size(18)
+                        .color(accent)
                         .into(),
                     BackupOutcome::PartialVerified => {
-                        text("✓ Partial backup completed and verified.")
-                            .size(20)
+                        text("✓  Partial backup completed and verified")
+                            .size(18)
+                            .color(accent)
                             .into()
                     }
-                    BackupOutcome::Failed(msg) => {
-                        column![text("✗ Backup failed").size(20), text(msg.clone()).size(13),]
-                            .spacing(8)
-                            .into()
-                    }
+                    BackupOutcome::Failed(msg) => column![
+                        text("✗  Backup failed").size(18),
+                        text(msg.clone()).size(13).color(muted),
+                    ]
+                    .spacing(SP_XS)
+                    .into(),
                 };
                 column![
                     summary,
-                    button(text("Back to start")).on_press(Message::BackToStart),
+                    button(
+                        text("Back to start")
+                            .size(14)
+                            .wrapping(text::Wrapping::None)
+                    )
+                    .padding([SP_XS, SP_SM])
+                    .style(theme::secondary_button(accent, txt))
+                    .on_press(Message::BackToStart),
                 ]
-                .spacing(16)
+                .spacing(SP_MD)
                 .into()
             }
         };
 
-        container(column![remote_row, status].spacing(20))
+        container(column![remote_row, status].spacing(SP_MD))
             .style(theme::panel(self.preset.surface()))
-            .padding(20.0)
+            .padding(SP_MD)
             .width(Length::Fill)
+            .height(Length::Fill)
             .into()
     }
 
@@ -1186,8 +1224,8 @@ impl App {
                 result: PreflightResult::Ready { report },
             } => match &report.space {
                 SpaceStatus::Fits { .. } | SpaceStatus::Unknown => {
-                    button(text("BACK UP NOW").size(16))
-                        .padding([12, 28])
+                    button(text("Back up now").size(16).wrapping(text::Wrapping::None))
+                        .padding([SP_SM, SP_LG])
                         .style(theme::primary_button(self.preset.accent()))
                         .on_press(Message::StartBackup)
                         .into()
@@ -1198,15 +1236,16 @@ impl App {
         };
 
         let power = checkbox(self.power_off)
-            .label("POWER OFF AFTER BACKUP")
+            .label("Power off after a successful backup")
             .on_toggle(Message::PowerOffToggled);
 
         container(
             row![power, space().width(Length::Fill), action]
                 .align_y(iced::Alignment::Center)
-                .spacing(16),
+                .spacing(SP_MD),
         )
         .width(Length::Fill)
+        .padding(iced::Padding::default().top(SP_XS))
         .into()
     }
 
