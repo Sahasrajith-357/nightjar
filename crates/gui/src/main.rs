@@ -677,10 +677,6 @@ impl App {
                 } else {
                     self.notice = None;
                 }
-
-                if added > 0 {
-                    self.preflight_stale = true;
-                }
                 Task::none()
             }
             Message::RemoveSource(path) => {
@@ -689,10 +685,7 @@ impl App {
                     let before = config.sources.len();
                     config.sources.retain(|s| s.path != path);
                     if config.sources.len() != before {
-                        if let Ok(cfgpath) = config_io::config_path() {
-                            let _ = config_io::save_to(config, &cfgpath);
-                        }
-                        // Mark preflight stale; do NOT re-run it here (instant edit).
+                        // invalidate_after_edit persists the change and marks stale.
                         self.invalidate_after_edit();
                     }
                 }
@@ -954,21 +947,23 @@ impl App {
 
         // Header: title grows, buttons stay natural width and wrap below when
         // the window is narrow — so labels never overflow their outlines.
-        let title = text("Folders to back up").size(20);
+        let title = text("FOLDERS TO BACK UP")
+            .size(20)
+            .color(self.preset.accent());
         let add_buttons = row![
-            button(text("Tree").size(14).wrapping(text::Wrapping::None))
+            button(text("TREE").size(14).wrapping(text::Wrapping::None))
                 .padding([SP_XS, SP_SM])
                 .style(theme::secondary_button(accent, txt))
                 .on_press(Message::OpenTree),
             button(
-                text("Common folders")
+                text("COMMON FOLDERS")
                     .size(14)
                     .wrapping(text::Wrapping::None)
             )
             .padding([SP_XS, SP_SM])
             .style(theme::secondary_button(accent, txt))
             .on_press(Message::ApplyPreset),
-            button(text("Add folders").size(14).wrapping(text::Wrapping::None))
+            button(text("ADD FOLDERS").size(14).wrapping(text::Wrapping::None))
                 .padding([SP_XS, SP_SM])
                 .style(theme::secondary_button(accent, txt))
                 .on_press(Message::AddFolderClicked),
@@ -1047,7 +1042,7 @@ impl App {
         let remote_row: Element<'_, Message> = if self.remotes.is_empty() {
             row![
                 text("No cloud connected").size(15).width(Length::Fill),
-                button(text("Connect").size(13).wrapping(text::Wrapping::None))
+                button(text("CONNECT").size(13).wrapping(text::Wrapping::None))
                     .padding([SP_XS, SP_SM])
                     .style(theme::secondary_button(accent, txt))
                     .on_press(Message::OpenConnectCloud),
@@ -1058,10 +1053,10 @@ impl App {
         } else {
             let selected = Some(self.remote.clone());
             row![
-                text("Cloud").size(14).color(muted),
+                text("CLOUD").size(14).color(muted),
                 pick_list(self.remotes.clone(), selected, Message::RemoteSelected)
                     .width(Length::Fill),
-                button(text("Connect").size(13).wrapping(text::Wrapping::None))
+                button(text("CONNECT").size(13).wrapping(text::Wrapping::None))
                     .padding([SP_XS, SP_SM])
                     .style(theme::secondary_button(accent, txt))
                     .on_press(Message::OpenConnectCloud),
@@ -1073,7 +1068,7 @@ impl App {
 
         let recalc_btn = || {
             button(
-                text("Recalculate size")
+                text("RECALCULATE SIZE")
                     .size(14)
                     .wrapping(text::Wrapping::None),
             )
@@ -1249,7 +1244,7 @@ impl App {
 
                 col = col.push(
                     button(
-                        text("Back to start")
+                        text("BACK TO START")
                             .size(14)
                             .wrapping(text::Wrapping::None),
                     )
@@ -1355,11 +1350,11 @@ impl App {
         .spacing(12);
 
         let actions = row![
-            button(text("Run guided setup").size(15))
+            button(text("RUN GUIDED SETUP").size(15))
                 .padding([10, 22])
                 .style(theme::primary_button(accent))
                 .on_press(Message::LaunchGuidedSetup),
-            button(text("I've connected — refresh").size(15))
+            button(text("I'VE CONNECTED — REFRESH").size(15))
                 .padding([10, 22])
                 .style(theme::secondary_button(accent, txt))
                 .on_press(Message::RefreshRemotes),
@@ -1378,7 +1373,7 @@ impl App {
 
         // A back link in case they want to return without connecting.
         col = col.push(
-            button(text("← Back").size(14))
+            button(text("← BACK").size(14))
                 .padding([8, 16])
                 .style(theme::secondary_button(accent, txt))
                 .on_press(Message::RefreshRemotes),
@@ -1398,7 +1393,7 @@ impl App {
                 result: PreflightResult::Ready { report },
             } => match &report.space {
                 SpaceStatus::Fits { .. } | SpaceStatus::Unknown => {
-                    button(text("Back up now").size(16).wrapping(text::Wrapping::None))
+                    button(text("BACK UP NOW").size(16).wrapping(text::Wrapping::None))
                         .padding([SP_SM, SP_LG])
                         .style(theme::primary_button(self.preset.accent()))
                         .on_press(Message::StartBackup)
@@ -1407,7 +1402,7 @@ impl App {
                 SpaceStatus::Shortfall { .. } => text("").into(),
             },
             Phase::BackingUp { .. } => {
-                button(text("Abort").size(16).wrapping(text::Wrapping::None))
+                button(text("ABORT").size(16).wrapping(text::Wrapping::None))
                     .padding([SP_SM, SP_LG])
                     .style(theme::secondary_button(
                         self.preset.accent(),
@@ -1419,9 +1414,11 @@ impl App {
             _ => text("").into(),
         };
 
-        let power = checkbox(self.power_off)
-            .label("Power off after a successful backup")
-            .on_toggle(Message::PowerOffToggled);
+        let power = row![
+            checkbox(self.power_off).on_toggle(Message::PowerOffToggled),
+            text("POWER OFF AFTER SUCCESSFUL BACKUP").color(self.preset.accent()),
+        ]
+        .spacing(10);
 
         container(
             row![power, space().width(Length::Fill), action]
@@ -1451,9 +1448,15 @@ impl App {
     /// After a source-list edit, invalidate any in-progress shortfall
     /// decision so the user can recalculate with the new list.
     fn invalidate_after_edit(&mut self) {
+        // Persist the edited source list so it survives the reload that
+        // recalculate / preflight performs.
+        if let Some(config) = &self.config {
+            if let Ok(path) = config_io::config_path() {
+                let _ = config_io::save_to(config, &path);
+            }
+        }
         self.preflight_stale = true;
         match self.phase {
-            // If mid-decision or measuring, drop back to a recalculable state.
             Phase::Choosing { .. } | Phase::Measuring => {
                 self.phase = Phase::NeedsRecalc;
             }
@@ -1470,7 +1473,7 @@ impl App {
         .width(Length::Fixed(180.0));
 
         container(
-            row![text("Theme:").size(13).color(self.preset.muted()), picker]
+            row![text("THEME:").size(13).color(self.preset.muted()), picker]
                 .spacing(10)
                 .align_y(iced::Alignment::Center),
         )
@@ -1509,9 +1512,9 @@ impl App {
             .height(Length::Fill);
 
         let header = row![
-            text("Directory tree").size(20).color(accent),
+            text("DIRECTORY TREE").size(20).color(accent),
             space().width(Length::Fill),
-            button(text("← Back").size(14).wrapping(text::Wrapping::None))
+            button(text("← BACK").size(14).wrapping(text::Wrapping::None))
                 .padding([SP_XS, SP_SM])
                 .style(theme::secondary_button(accent, txt))
                 .on_press(Message::BackToStart),
