@@ -1,0 +1,12 @@
+# nightjar automatic backups (runs the backup unattended).
+# Run `crontab -e` and paste ONE line. Fix the path to your nightjar-cli binary.
+# The CLI fails fast and safely if the network/cloud is unreachable.
+
+# Every day at 2:00 AM (smallest-first if space is short)
+0 2 * * * /home/you/.local/bin/nightjar-cli backup -y --partial-method smallest-first
+
+# Every Sunday at 3:00 AM
+# 0 3 * * 0 /home/you/.local/bin/nightjar-cli backup -y --partial-method smallest-first
+
+# Every day at 2:00 AM, then power off when done (unattended overnight backup)
+# 0 2 * * * /home/you/.local/bin/nightjar-cli backup -y --partial-method smallest-first --power-off

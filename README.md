@@ -352,6 +352,10 @@ crontab -e
 (`notify-send` is provided by `libnotify` — `sudo apt install libnotify-bin` if
 you don't have it.)
 
+Ready-to-use templates are in [`examples/`](examples/):
+- `crontab-reminder.txt` + `nightjar-reminder.sh` — desktop reminders
+- `crontab-autobackup.txt` — automatic scheduled backups
+
 ---
 
 ## License

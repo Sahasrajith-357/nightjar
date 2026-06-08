@@ -1,0 +1,16 @@
+# nightjar backup reminders (desktop notifications).
+# 1. Make the script executable:  chmod +x /path/to/nightjar/examples/nightjar-reminder.sh
+# 2. Run `crontab -e` and paste ONE of the lines below.
+# 3. Fix the path to where you cloned nightjar.
+
+# Every Sunday at 6:00 PM
+0 18 * * 0 /path/to/nightjar/examples/nightjar-reminder.sh
+
+# Every day at 9:00 PM
+# 0 21 * * * /path/to/nightjar/examples/nightjar-reminder.sh
+
+# Every weekday (Mon-Fri) at 5:30 PM
+# 30 17 * * 1-5 /path/to/nightjar/examples/nightjar-reminder.sh
+
+# First day of every month at 10:00 AM
+# 0 10 1 * * /path/to/nightjar/examples/nightjar-reminder.sh
