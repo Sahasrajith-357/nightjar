@@ -668,10 +668,15 @@ impl App {
     fn view(&self) -> Element<'_, Message> {
         let wide = self.window_width >= 900.0;
 
-        let shell = column![self.masthead(), self.body(wide), self.footer()]
-            .spacing(28)
-            .width(Length::Fill)
-            .height(Length::Fill);
+        let shell = column![
+            self.masthead(),
+            self.theme_bar(),
+            self.body(wide),
+            self.footer()
+        ]
+        .spacing(28)
+        .width(Length::Fill)
+        .height(Length::Fill);
 
         // Constrain very wide windows to a comfortable band; fill otherwise.
         // Fill the whole window with comfortable padding — versatile across
@@ -696,14 +701,8 @@ impl App {
             .size(16)
             .color(self.preset.muted());
 
-        let theme_picker = pick_list(
-            Preset::ALL.to_vec(),
-            Some(self.preset),
-            Message::ThemeSelected,
-        );
-
         let foreground = container(
-            column![title, motto, theme_picker]
+            column![title, motto]
                 .spacing(10)
                 .align_x(iced::Alignment::Center),
         )
@@ -758,7 +757,7 @@ impl App {
                 list = list.push(
                     text("No folders selected yet.\nAdd folders to back up.")
                         .size(15)
-                        .color(Color::from_rgb8(0x9a, 0x8f, 0x95)),
+                        .color(self.preset.muted()),
                 );
             } else {
                 for s in &config.sources {
@@ -795,21 +794,35 @@ impl App {
         let accent = self.preset.accent();
         let txt = Color::from_rgb8(0xc9, 0xbf, 0xc4);
         let buttons = row![
-            button(text("Common folders"))
-                .padding([8, 16])
-                .style(theme::secondary_button(accent, txt))
-                .on_press(Message::ApplyPreset),
-            button(text("+ Add folders"))
-                .padding([8, 16])
-                .style(theme::secondary_button(accent, txt))
-                .on_press(Message::AddFolderClicked),
+            button(
+                container(text("COMMON FOLDERS").size(14))
+                    .center_x(Length::Fill)
+                    .center_y(Length::Fill),
+            )
+            .width(Length::Fixed(148.0))
+            .height(Length::Fixed(36.0))
+            .padding([0, 12])
+            .style(theme::secondary_button(accent, txt))
+            .on_press(Message::ApplyPreset),
+            button(
+                container(text("ADD FOLDERS").size(14))
+                    .center_x(Length::Fill)
+                    .center_y(Length::Fill),
+            )
+            .width(Length::Fixed(130.0))
+            .height(Length::Fixed(36.0))
+            .padding([0, 12])
+            .style(theme::secondary_button(accent, txt))
+            .on_press(Message::AddFolderClicked),
         ]
         .spacing(10);
 
         // Narrow windows: stack title above buttons so labels never overflow.
         let header_row: Element<'_, Message> = if self.window_width >= 700.0 {
             row![
-                text("Folders to back up").size(20),
+                text("Folders to back up")
+                    .size(20)
+                    .color(self.preset.accent()),
                 space().width(Length::Fill),
                 buttons,
             ]
@@ -1102,6 +1115,23 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    fn theme_bar(&self) -> Element<'_, Message> {
+        let picker = pick_list(
+            Preset::ALL.to_vec(),
+            Some(self.preset),
+            Message::ThemeSelected,
+        )
+        .width(Length::Fixed(180.0));
+
+        container(
+            row![text("Theme:").size(13).color(self.preset.muted()), picker]
+                .spacing(10)
+                .align_y(iced::Alignment::Center),
+        )
+        .center_x(Length::Fill)
+        .into()
     }
 }
 

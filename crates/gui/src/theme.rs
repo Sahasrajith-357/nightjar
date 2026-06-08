@@ -13,15 +13,21 @@ pub enum Preset {
     Midnight,
     Mono,
     Forest,
+    NeonCyan,
+    NeonMagenta,
+    NeonGreen,
 }
 
 impl Preset {
     /// All presets, in display order.
-    pub const ALL: [Preset; 4] = [
+    pub const ALL: [Preset; 7] = [
         Preset::Ember,
         Preset::Midnight,
         Preset::Mono,
         Preset::Forest,
+        Preset::NeonCyan,
+        Preset::NeonMagenta,
+        Preset::NeonGreen,
     ];
 
     /// The display name (also used for persistence).
@@ -31,6 +37,9 @@ impl Preset {
             Preset::Midnight => "Midnight",
             Preset::Mono => "Mono",
             Preset::Forest => "Forest",
+            Preset::NeonCyan => "Neon Cyan",
+            Preset::NeonMagenta => "Neon Magenta",
+            Preset::NeonGreen => "Neon Green",
         }
     }
 
@@ -40,6 +49,9 @@ impl Preset {
             "Midnight" => Preset::Midnight,
             "Mono" => Preset::Mono,
             "Forest" => Preset::Forest,
+            "Neon Cyan" => Preset::NeonCyan,
+            "Neon Magenta" => Preset::NeonMagenta,
+            "Neon Green" => Preset::NeonGreen,
             _ => Preset::Ember,
         }
     }
@@ -51,6 +63,9 @@ impl Preset {
             Preset::Midnight => Color::from_rgb8(0x6f, 0xb3, 0xd6), // cool cyan-blue
             Preset::Mono => Color::from_rgb8(0xcf, 0xcf, 0xd4),  // soft white
             Preset::Forest => Color::from_rgb8(0x8f, 0xc7, 0x8f), // sage green
+            Preset::NeonCyan => Color::from_rgb8(0x00, 0xf0, 0xff),
+            Preset::NeonMagenta => Color::from_rgb8(0xff, 0x2d, 0x95),
+            Preset::NeonGreen => Color::from_rgb8(0x39, 0xff, 0x14),
         }
     }
 
@@ -61,6 +76,9 @@ impl Preset {
             Preset::Midnight => Color::from_rgb8(0x7d, 0x8a, 0x99),
             Preset::Mono => Color::from_rgb8(0x8a, 0x8a, 0x90),
             Preset::Forest => Color::from_rgb8(0x88, 0x96, 0x88),
+            Preset::NeonCyan => Color::from_rgb8(0x5a, 0x7a, 0x82),
+            Preset::NeonMagenta => Color::from_rgb8(0x82, 0x5a, 0x6e),
+            Preset::NeonGreen => Color::from_rgb8(0x5a, 0x82, 0x5a),
         }
     }
 
@@ -99,6 +117,30 @@ impl Preset {
                 warning: Color::from_rgb8(0xd0, 0xc0, 0x80),
                 danger: Color::from_rgb8(0xc8, 0x7e, 0x6e),
             },
+            Preset::NeonCyan => Palette {
+                background: Color::from_rgb8(0x0a, 0x0a, 0x0c),
+                text: Color::from_rgb8(0xb8, 0xc8, 0xcc),
+                primary: Color::from_rgb8(0x00, 0xf0, 0xff),
+                success: Color::from_rgb8(0x00, 0xf0, 0xff),
+                warning: Color::from_rgb8(0xff, 0xd0, 0x4d),
+                danger: Color::from_rgb8(0xff, 0x4d, 0x6e),
+            },
+            Preset::NeonMagenta => Palette {
+                background: Color::from_rgb8(0x0a, 0x08, 0x0a),
+                text: Color::from_rgb8(0xcc, 0xb8, 0xc4),
+                primary: Color::from_rgb8(0xff, 0x2d, 0x95),
+                success: Color::from_rgb8(0x4d, 0xff, 0xb0),
+                warning: Color::from_rgb8(0xff, 0xd0, 0x4d),
+                danger: Color::from_rgb8(0xff, 0x4d, 0x4d),
+            },
+            Preset::NeonGreen => Palette {
+                background: Color::from_rgb8(0x08, 0x0a, 0x08),
+                text: Color::from_rgb8(0xbc, 0xcc, 0xbc),
+                primary: Color::from_rgb8(0x39, 0xff, 0x14),
+                success: Color::from_rgb8(0x39, 0xff, 0x14),
+                warning: Color::from_rgb8(0xe0, 0xff, 0x4d),
+                danger: Color::from_rgb8(0xff, 0x5e, 0x4d),
+            },
         };
         Theme::custom(format!("nightjar-{}", self.name()), palette)
     }
@@ -110,6 +152,9 @@ impl Preset {
             Preset::Midnight => Color::from_rgb8(0x16, 0x1c, 0x28),
             Preset::Mono => Color::from_rgb8(0x1e, 0x1e, 0x22),
             Preset::Forest => Color::from_rgb8(0x18, 0x20, 0x1a),
+            Preset::NeonCyan => Color::from_rgb8(0x0c, 0x10, 0x12),
+            Preset::NeonMagenta => Color::from_rgb8(0x12, 0x0c, 0x10),
+            Preset::NeonGreen => Color::from_rgb8(0x0c, 0x12, 0x0c),
         }
     }
 }
