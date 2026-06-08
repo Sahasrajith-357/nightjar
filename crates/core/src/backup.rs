@@ -19,6 +19,9 @@ use crate::partial::SizedSource;
 use crate::rclone;
 use crate::state::BackupOutcome;
 
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+
 /// Copies and verifies one source, in that order. Returns Ok(()) only if
 /// both succeed. The first failing step's error is converted to a string
 /// for the outcome.
@@ -107,19 +110,19 @@ pub fn backup_one_source(config: &Config, source: &Source) -> Result<(), String>
 pub fn backup_one_source_streaming(
     config: &Config,
     source: &Source,
+    cancel: Arc<AtomicBool>,
     on_progress: impl FnMut(f32),
 ) -> Result<(), String> {
-    // Copy with streaming progress.
     rclone::copy_source_streaming(
         source,
         &config.remote,
         &config.destination_path,
         &config.excludes,
+        cancel,
         on_progress,
     )
     .map_err(|e| format!("copy of '{}' failed: {e}", source.name))?;
 
-    // Verify exactly as the non-streaming path does.
     rclone::verify_source(source, &config.remote, &config.destination_path)
         .map_err(|e| format!("verification of '{}' failed: {e}", source.name))?;
 

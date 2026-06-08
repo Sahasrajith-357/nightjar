@@ -21,6 +21,7 @@ use nightjar_core::preflight::{self, PreflightReport, SpaceStatus};
 use nightjar_core::rclone;
 use nightjar_core::state::BackupOutcome;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 mod theme;
 use theme::Preset;
@@ -97,6 +98,7 @@ struct App {
     preset: Preset,
     report: Option<BackupReport>,
     last_backup_size: u64,
+    cancel: Arc<AtomicBool>,
 }
 
 #[derive(Debug, Clone)]
@@ -126,6 +128,7 @@ enum Message {
     ReportReady(Vec<String>, u64, Option<u64>),
     OpenTree,
     TreeReady(Vec<nightjar_core::tree::TreeEntry>),
+    AbortBackup,
 }
 
 #[derive(Debug, Clone)]
@@ -150,6 +153,7 @@ fn boot() -> (App, Task<Message>) {
         preset: Preset::Ember,
         report: None,
         last_backup_size: 0,
+        cancel: Arc::new(AtomicBool::new(false)),
     };
     let task = Task::perform(
         run_preflight_blocking(),
@@ -245,9 +249,10 @@ async fn backup_one_blocking(
     config: Config,
     source: Source,
     progress: Arc<Mutex<f32>>,
+    cancel: Arc<AtomicBool>,
 ) -> Result<(), String> {
     tokio::task::spawn_blocking(move || {
-        backup::backup_one_source_streaming(&config, &source, |frac| {
+        backup::backup_one_source_streaming(&config, &source, cancel, |frac| {
             if let Ok(mut p) = progress.lock() {
                 *p = frac;
             }
@@ -277,17 +282,18 @@ fn next_source_task(
     sources: &[Source],
     done: usize,
     progress: &Arc<Mutex<f32>>,
+    cancel: &Arc<AtomicBool>,
 ) -> Option<Task<Message>> {
     if done < sources.len() {
-        // Reset the bar for the new source.
         if let Ok(mut p) = progress.lock() {
             *p = 0.0;
         }
         let config = config.clone();
         let source = sources[done].clone();
         let progress = progress.clone();
+        let cancel = cancel.clone();
         Some(Task::perform(
-            backup_one_blocking(config, source, progress),
+            backup_one_blocking(config, source, progress, cancel),
             Message::SourceDone,
         ))
     } else {
@@ -431,8 +437,9 @@ impl App {
                         return Task::none();
                     }
                     let current = sources[0].name.clone();
-                    let task = next_source_task(&config, &sources, 0, &self.progress)
+                    let task = next_source_task(&config, &sources, 0, &self.progress, &self.cancel)
                         .unwrap_or(Task::none());
+                    self.cancel.store(false, Ordering::Relaxed);
                     self.displayed_progress = 0.0;
                     self.phase = Phase::BackingUp {
                         sources,
@@ -509,8 +516,15 @@ impl App {
                                 let sources: Vec<Source> =
                                     chosen.iter().map(|s| s.source.clone()).collect();
                                 let current = sources[0].name.clone();
-                                let task = next_source_task(&config, &sources, 0, &self.progress)
-                                    .unwrap_or(Task::none());
+                                let task = next_source_task(
+                                    &config,
+                                    &sources,
+                                    0,
+                                    &self.progress,
+                                    &self.cancel,
+                                )
+                                .unwrap_or(Task::none());
+                                self.cancel.store(false, Ordering::Relaxed);
                                 self.displayed_progress = 0.0;
                                 self.phase = Phase::BackingUp {
                                     sources,
@@ -533,8 +547,16 @@ impl App {
                     match result {
                         Err(message) => {
                             // First failure: stop, do not touch later sources.
-                            // A failed backup gets no report and no power-off.
-                            self.phase = Phase::Finished(BackupOutcome::Failed(message));
+                            let outcome = if self.cancel.load(Ordering::Relaxed) {
+                                BackupOutcome::Failed(
+                                    "Aborted — backup incomplete. Some files may have been \
+                                     copied; run the backup again to finish."
+                                        .to_string(),
+                                )
+                            } else {
+                                BackupOutcome::Failed(message)
+                            };
+                            self.phase = Phase::Finished(outcome);
                             Task::none()
                         }
                         Ok(()) => {
@@ -551,6 +573,7 @@ impl App {
                                         &sources_clone,
                                         done_now,
                                         &self.progress,
+                                        &self.cancel,
                                     )
                                     .unwrap_or(Task::none());
                                     if let Phase::BackingUp { current: c, .. } = &mut self.phase {
@@ -601,6 +624,12 @@ impl App {
                 } else {
                     Task::none()
                 }
+            }
+            Message::AbortBackup => {
+                // Signal the running copy to stop; it kills rclone and returns
+                // an error, which SourceDone routes to an aborted outcome.
+                self.cancel.store(true, Ordering::Relaxed);
+                Task::none()
             }
             Message::AddFolderClicked => {
                 self.notice = None;
@@ -1377,6 +1406,16 @@ impl App {
                 }
                 SpaceStatus::Shortfall { .. } => text("").into(),
             },
+            Phase::BackingUp { .. } => {
+                button(text("Abort").size(16).wrapping(text::Wrapping::None))
+                    .padding([SP_SM, SP_LG])
+                    .style(theme::secondary_button(
+                        self.preset.accent(),
+                        Color::from_rgb8(0xc9, 0xbf, 0xc4),
+                    ))
+                    .on_press(Message::AbortBackup)
+                    .into()
+            }
             _ => text("").into(),
         };
 

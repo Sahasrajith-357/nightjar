@@ -11,6 +11,8 @@ use serde::Deserialize;
 use std::io::{BufRead, BufReader};
 use std::process::Command;
 use std::process::Stdio;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// The name of the rclone binary. We rely on it being on the system PATH
 /// (Option A). Centralized here so an override could be added later.
@@ -370,6 +372,7 @@ pub fn copy_source_streaming(
     remote: &str,
     dest_path: &str,
     excludes: &[String],
+    cancel: Arc<AtomicBool>,
     mut on_progress: impl FnMut(f32),
 ) -> Result<()> {
     let mut args = build_copy_args(source, remote, dest_path, excludes);
@@ -401,6 +404,12 @@ pub fn copy_source_streaming(
     if let Some(stderr) = child.stderr.take() {
         let reader = BufReader::new(stderr);
         for line in reader.lines() {
+            // Check for an abort request between stats lines.
+            if cancel.load(Ordering::Relaxed) {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(Error::Cancelled);
+            }
             let line = match line {
                 Ok(l) => l,
                 Err(_) => break,
@@ -426,6 +435,9 @@ pub fn copy_source_streaming(
         Err(e) => return Err(Error::Io(e)),
     };
 
+    if cancel.load(Ordering::Relaxed) {
+        return Err(Error::Cancelled);
+    }
     if status.success() {
         on_progress(1.0); // ensure the bar reaches full on success
         Ok(())
@@ -740,9 +752,11 @@ mod tests {
 
         let last = Arc::new(Mutex::new(-1.0f32));
         let last_cl = last.clone();
-        let result = copy_source_streaming(&source, "cloud", "NightjarBackup", &[], move |f| {
-            *last_cl.lock().unwrap() = f;
-        });
+        let cancel = Arc::new(AtomicBool::new(false));
+        let result =
+            copy_source_streaming(&source, "cloud", "NightjarBackup", &[], cancel, move |f| {
+                *last_cl.lock().unwrap() = f;
+            });
 
         assert!(result.is_ok(), "streaming copy should succeed: {result:?}");
         // On success we force 1.0 at the end.
