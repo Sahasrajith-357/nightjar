@@ -8,7 +8,9 @@
 use crate::Result;
 use crate::error::Error;
 use serde::Deserialize;
+use std::io::{BufRead, BufReader};
 use std::process::Command;
+use std::process::Stdio;
 
 /// The name of the rclone binary. We rely on it being on the system PATH
 /// (Option A). Centralized here so an override could be added later.
@@ -340,6 +342,123 @@ pub fn verify_source(source: &crate::config::Source, remote: &str, dest_path: &s
     }
 }
 
+/// rclone's --use-json-log lines carry a "stats" object; we read transferred
+/// vs total bytes from it to compute progress.
+#[derive(Debug, Deserialize)]
+struct StatsLine {
+    stats: Option<StatsBody>,
+}
+
+#[derive(Debug, Deserialize)]
+struct StatsBody {
+    #[serde(default)]
+    bytes: u64,
+    #[serde(rename = "totalBytes", default)]
+    total_bytes: u64,
+}
+
+/// Copies a single source like `copy_source`, but streams progress: rclone is
+/// run with periodic JSON stats, and `on_progress` is called with a fraction
+/// in 0.0..=1.0 as the transfer proceeds.
+///
+/// Progress is BEST-EFFORT and display-only: unparseable stats lines are
+/// ignored, and progress reporting never affects the success/failure result.
+/// The copy arguments are identical to `copy_source` (via build_copy_args),
+/// with stats flags appended; verification is unchanged and handled elsewhere.
+pub fn copy_source_streaming(
+    source: &crate::config::Source,
+    remote: &str,
+    dest_path: &str,
+    excludes: &[String],
+    mut on_progress: impl FnMut(f32),
+) -> Result<()> {
+    let mut args = build_copy_args(source, remote, dest_path, excludes);
+    // Append stats flags for periodic, parseable progress on stderr.
+    args.push("--stats".to_string());
+    args.push("1s".to_string());
+    args.push("--use-json-log".to_string());
+    args.push("--stats-one-line".to_string());
+
+    let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+
+    // Spawn rclone with stderr piped so we can read stats as they stream.
+    let mut child = match rclone_command()
+        .args(&arg_refs)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(Error::RcloneNotFound);
+        }
+        Err(e) => return Err(Error::Io(e)),
+    };
+
+    // Read stderr line by line, parsing JSON stats for progress.
+    let mut captured_stderr = String::new();
+    if let Some(stderr) = child.stderr.take() {
+        let reader = BufReader::new(stderr);
+        for line in reader.lines() {
+            let line = match line {
+                Ok(l) => l,
+                Err(_) => break,
+            };
+            // Best-effort parse; ignore anything that isn't the stats JSON.
+            if let Ok(parsed) = serde_json::from_str::<StatsLine>(&line) {
+                if let Some(stats) = parsed.stats {
+                    if stats.total_bytes > 0 {
+                        let frac = (stats.bytes as f32 / stats.total_bytes as f32).clamp(0.0, 1.0);
+                        on_progress(frac);
+                    }
+                }
+            }
+            // Keep the last bit of stderr for error reporting on failure.
+            captured_stderr.push_str(&line);
+            captured_stderr.push('\n');
+        }
+    }
+
+    // Wait for rclone to finish and interpret the result.
+    let status = match child.wait() {
+        Ok(s) => s,
+        Err(e) => return Err(Error::Io(e)),
+    };
+
+    if status.success() {
+        on_progress(1.0); // ensure the bar reaches full on success
+        Ok(())
+    } else {
+        // Same heuristic error mapping as copy_source.
+        let lower = captured_stderr.to_lowercase();
+        if lower.contains("no such host")
+            || lower.contains("network is unreachable")
+            || lower.contains("connection refused")
+            || lower.contains("timeout")
+            || lower.contains("timed out")
+            || lower.contains("dial tcp")
+            || lower.contains("temporary failure in name resolution")
+        {
+            Err(Error::NetworkUnavailable)
+        } else if lower.contains("quota")
+            || lower.contains("storage full")
+            || lower.contains("no space left")
+            || lower.contains("insufficient storage")
+            || lower.contains("limit exceeded")
+        {
+            Err(Error::StorageFull)
+        } else {
+            let code = status.code().unwrap_or(-1);
+            let message = if captured_stderr.trim().is_empty() {
+                "rclone exited with a non-zero status".to_string()
+            } else {
+                captured_stderr.trim().to_string()
+            };
+            Err(Error::RcloneFailed { code, message })
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -543,5 +662,30 @@ mod tests {
         let remotes = list_remotes().expect("listremotes should work");
         // On the dev machine, "cloud" is configured.
         assert!(remotes.iter().any(|r| r == "cloud"));
+    }
+
+    #[test]
+    #[ignore = "requires a real configured remote with network access"]
+    fn copy_source_streaming_reports_progress_real() {
+        use std::fs;
+        use std::sync::{Arc, Mutex};
+
+        // Run manually: cargo test -p nightjar-core -- --ignored
+        let src_dir = tempfile::tempdir().expect("src dir");
+        fs::write(src_dir.path().join("stream_test.bin"), vec![0u8; 8192]).expect("write");
+        let source = crate::config::Source {
+            name: "NightjarStreamTest".to_string(),
+            path: src_dir.path().to_path_buf(),
+        };
+
+        let last = Arc::new(Mutex::new(-1.0f32));
+        let last_cl = last.clone();
+        let result = copy_source_streaming(&source, "cloud", "NightjarBackup", &[], move |f| {
+            *last_cl.lock().unwrap() = f;
+        });
+
+        assert!(result.is_ok(), "streaming copy should succeed: {result:?}");
+        // On success we force 1.0 at the end.
+        assert_eq!(*last.lock().unwrap(), 1.0);
     }
 }
