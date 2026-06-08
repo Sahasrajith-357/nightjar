@@ -123,7 +123,10 @@ If `nightjar-cli` isn't found afterward, ensure `~/.local/bin` is on your `PATH`
 ## Configuration
 
 nightjar reads a config file at:
-~/.config/nightjar/
+
+```
+~/.config/nightjar/config.toml
+```
 
 You normally don't need to edit this by hand — the GUI manages it for you. But here is the format:
 
@@ -194,10 +197,13 @@ Pick a theme from the selector under the title — seven are included, from warm
 
 The CLI is ideal for scripts and scheduled (cron) backups — it runs unattended and uses exit codes to report success or failure.
 
+```
 nightjar-cli <COMMAND>
+
 Commands:
-backup     Run a backup. Without flags, prompts interactively for any decisions
-preflight  Run all pre-backup checks and report, without transferring anything
+  backup     Run a backup. Without flags, prompts interactively for any decisions
+  preflight  Run all pre-backup checks and report, without transferring anything
+```
 
 ### Check everything is ready, without transferring
 
