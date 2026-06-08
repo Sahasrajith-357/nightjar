@@ -375,9 +375,10 @@ pub fn copy_source_streaming(
     let mut args = build_copy_args(source, remote, dest_path, excludes);
     // Append stats flags for periodic, parseable progress on stderr.
     args.push("--stats".to_string());
-    args.push("1s".to_string());
+    args.push("200ms".to_string());
     args.push("--use-json-log".to_string());
     args.push("--stats-one-line".to_string());
+    args.push("-v".to_string()); // stats JSON lines are INFO-level; -v enables them
 
     let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
 

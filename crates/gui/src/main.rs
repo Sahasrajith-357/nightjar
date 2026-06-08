@@ -7,6 +7,7 @@
 //! exhaustively-tested partial-selection logic.
 
 use iced::theme::Palette;
+use iced::time::{self, Duration};
 use iced::widget::{
     button, checkbox, column, container, pick_list, progress_bar, row, scrollable, space, text,
 };
@@ -20,6 +21,7 @@ use nightjar_core::preflight::{self, PreflightReport, SpaceStatus};
 use nightjar_core::rclone;
 use nightjar_core::state::BackupOutcome;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 /// Embedded fonts (bundled in crates/gui/fonts/).
 const BLANKA_BYTES: &[u8] = include_bytes!("../fonts/Blanka-Regular.otf");
@@ -86,6 +88,8 @@ struct App {
     notice: Option<String>,
     window_width: f32,
     preflight_stale: bool,
+    progress: Arc<Mutex<f32>>,
+    displayed_progress: f32,
 }
 
 #[derive(Debug, Clone)]
@@ -106,6 +110,7 @@ enum Message {
     WindowResized(Size),
     RecalcSize,
     BackToStart,
+    Tick,
 }
 
 fn boot() -> (App, Task<Message>) {
@@ -118,6 +123,8 @@ fn boot() -> (App, Task<Message>) {
         notice: None,
         window_width: 1200.0,
         preflight_stale: false,
+        progress: Arc::new(Mutex::new(0.0)),
+        displayed_progress: 0.0,
     };
     let task = Task::perform(
         run_preflight_blocking(),
@@ -209,20 +216,40 @@ async fn pick_folders() -> Vec<PathBuf> {
         .unwrap_or_default()
 }
 
-async fn backup_one_blocking(config: Config, source: Source) -> Result<(), String> {
-    tokio::task::spawn_blocking(move || backup::backup_one_source(&config, &source))
-        .await
-        .unwrap_or_else(|e| Err(format!("internal task error: {e}")))
+async fn backup_one_blocking(
+    config: Config,
+    source: Source,
+    progress: Arc<Mutex<f32>>,
+) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        backup::backup_one_source_streaming(&config, &source, |frac| {
+            if let Ok(mut p) = progress.lock() {
+                *p = frac;
+            }
+        })
+    })
+    .await
+    .unwrap_or_else(|e| Err(format!("internal task error: {e}")))
 }
 
 /// Given the ordered sources and how many are done, either launches the next
 /// source's backup or, if all are done, returns None to signal completion.
-fn next_source_task(config: &Config, sources: &[Source], done: usize) -> Option<Task<Message>> {
+fn next_source_task(
+    config: &Config,
+    sources: &[Source],
+    done: usize,
+    progress: &Arc<Mutex<f32>>,
+) -> Option<Task<Message>> {
     if done < sources.len() {
+        // Reset the bar for the new source.
+        if let Ok(mut p) = progress.lock() {
+            *p = 0.0;
+        }
         let config = config.clone();
         let source = sources[done].clone();
+        let progress = progress.clone();
         Some(Task::perform(
-            backup_one_blocking(config, source),
+            backup_one_blocking(config, source, progress),
             Message::SourceDone,
         ))
     } else {
@@ -360,7 +387,9 @@ impl App {
                         return Task::none();
                     }
                     let current = sources[0].name.clone();
-                    let task = next_source_task(&config, &sources, 0).unwrap_or(Task::none());
+                    let task = next_source_task(&config, &sources, 0, &self.progress)
+                        .unwrap_or(Task::none());
+                    self.displayed_progress = 0.0;
                     self.phase = Phase::BackingUp {
                         sources,
                         done: 0,
@@ -394,8 +423,9 @@ impl App {
                                 let sources: Vec<Source> =
                                     chosen.iter().map(|s| s.source.clone()).collect();
                                 let current = sources[0].name.clone();
-                                let task =
-                                    next_source_task(&config, &sources, 0).unwrap_or(Task::none());
+                                let task = next_source_task(&config, &sources, 0, &self.progress)
+                                    .unwrap_or(Task::none());
+                                self.displayed_progress = 0.0;
                                 self.phase = Phase::BackingUp {
                                     sources,
                                     done: 0,
@@ -431,8 +461,13 @@ impl App {
                                 // Advance to the next source.
                                 if let Some(config) = &self.config {
                                     let current = sources_clone[done_now].name.clone();
-                                    let task = next_source_task(config, &sources_clone, done_now)
-                                        .unwrap_or(Task::none());
+                                    let task = next_source_task(
+                                        config,
+                                        &sources_clone,
+                                        done_now,
+                                        &self.progress,
+                                    )
+                                    .unwrap_or(Task::none());
                                     if let Phase::BackingUp { current: c, .. } = &mut self.phase {
                                         *c = current;
                                     }
@@ -565,6 +600,24 @@ impl App {
                         Message::PreflightFinished(result, config, remote, remotes)
                     },
                 )
+            }
+            Message::Tick => {
+                // Compute the overall target: completed folders + current
+                // folder's fraction, divided by total folders.
+                let target = if let Phase::BackingUp { sources, done, .. } = &self.phase {
+                    let total = sources.len().max(1) as f32;
+                    let frac = self.progress.lock().map(|p| *p).unwrap_or(0.0);
+                    ((*done as f32) + frac) / total
+                } else {
+                    self.displayed_progress
+                };
+                let delta = target - self.displayed_progress;
+                if delta.abs() < 0.001 {
+                    self.displayed_progress = target;
+                } else {
+                    self.displayed_progress += delta * 0.1;
+                }
+                Task::none()
             }
         }
     }
@@ -787,12 +840,17 @@ impl App {
                 done,
                 current,
             } => {
-                let total = sources.len() as f32;
-                let value = *done as f32;
+                let pct = (self.displayed_progress * 100.0).clamp(0.0, 100.0);
                 column![
                     text(format!("Backing up '{current}'...")).size(18),
-                    text(format!("{} of {} folders done", done, sources.len())).size(14),
-                    progress_bar(0.0..=total, value).length(Length::Fill),
+                    text(format!(
+                        "{} of {} folders — {:.0}%",
+                        done,
+                        sources.len(),
+                        pct
+                    ))
+                    .size(14),
+                    progress_bar(0.0..=1.0, self.displayed_progress).length(Length::Fill),
                 ]
                 .spacing(14)
                 .into()
@@ -916,7 +974,15 @@ impl App {
     }
 
     fn subscription(&self) -> Subscription<Message> {
-        iced::window::resize_events().map(|(_id, size)| Message::WindowResized(size))
+        let resize = iced::window::resize_events().map(|(_id, size)| Message::WindowResized(size));
+
+        if matches!(self.phase, Phase::BackingUp { .. }) {
+            // Poll the shared progress ~6-7 times/sec for a smooth bar.
+            let tick = time::every(Duration::from_millis(33)).map(|_| Message::Tick);
+            Subscription::batch([resize, tick])
+        } else {
+            resize
+        }
     }
 }
 
