@@ -77,6 +77,10 @@ enum Phase {
         current: String,
     },
     Finished(BackupOutcome),
+    /// Showing the directory tree of the configured sources.
+    Tree(Vec<nightjar_core::tree::TreeEntry>),
+    /// Walking the filesystem to build the tree.
+    BuildingTree,
 }
 
 struct App {
@@ -120,6 +124,8 @@ enum Message {
     ApplyPreset,
     ThemeSelected(Preset),
     ReportReady(Vec<String>, u64, Option<u64>),
+    OpenTree,
+    TreeReady(Vec<nightjar_core::tree::TreeEntry>),
 }
 
 #[derive(Debug, Clone)]
@@ -256,6 +262,12 @@ async fn query_free_space(remote: String) -> Option<u64> {
         .await
         .ok()
         .flatten()
+}
+
+async fn build_tree_blocking(sources: Vec<Source>) -> Vec<nightjar_core::tree::TreeEntry> {
+    tokio::task::spawn_blocking(move || nightjar_core::tree::build_tree(&sources))
+        .await
+        .unwrap_or_default()
 }
 
 /// Given the ordered sources and how many are done, either launches the next
@@ -747,6 +759,22 @@ impl App {
                 });
                 Task::none()
             }
+            Message::OpenTree => {
+                if let Some(config) = &self.config {
+                    let sources = config.sources.clone();
+                    if sources.is_empty() {
+                        self.notice = Some("Add folders first to see their tree.".to_string());
+                        return Task::none();
+                    }
+                    self.phase = Phase::BuildingTree;
+                    return Task::perform(build_tree_blocking(sources), Message::TreeReady);
+                }
+                Task::none()
+            }
+            Message::TreeReady(entries) => {
+                self.phase = Phase::Tree(entries);
+                Task::none()
+            }
         }
     }
 
@@ -846,6 +874,20 @@ impl App {
             return self.connect_cloud_view();
         }
 
+        if let Phase::Tree(entries) = &self.phase {
+            return self.tree_view(entries);
+        }
+        if let Phase::BuildingTree = &self.phase {
+            return container(
+                text("Building directory tree…")
+                    .size(16)
+                    .color(self.preset.muted()),
+            )
+            .center_x(Length::Fill)
+            .center_y(Length::Fill)
+            .into();
+        }
+
         let folders = self.folder_panel();
         let status = self.status_panel();
 
@@ -885,6 +927,10 @@ impl App {
         // the window is narrow — so labels never overflow their outlines.
         let title = text("Folders to back up").size(20);
         let add_buttons = row![
+            button(text("Tree").size(14).wrapping(text::Wrapping::None))
+                .padding([SP_XS, SP_SM])
+                .style(theme::secondary_button(accent, txt))
+                .on_press(Message::OpenTree),
             button(
                 text("Common folders")
                     .size(14)
@@ -1023,6 +1069,8 @@ impl App {
             ]
             .spacing(SP_SM)
             .into(),
+
+            Phase::Tree(_) | Phase::BuildingTree => text("").into(),
 
             Phase::Ready { result } => match result {
                 PreflightResult::NoConfig(msg) => column![
@@ -1389,6 +1437,55 @@ impl App {
         )
         .center_x(Length::Fill)
         .into()
+    }
+    fn tree_view(&self, entries: &[nightjar_core::tree::TreeEntry]) -> Element<'_, Message> {
+        let accent = self.preset.accent();
+        let txt = Color::from_rgb8(0xc9, 0xbf, 0xc4);
+        let muted = self.preset.muted();
+
+        let mut list = column![].spacing(2);
+        if entries.is_empty() {
+            list = list.push(text("No directories found.").size(14).color(muted));
+        } else {
+            for e in entries {
+                // Indent by depth; roots (depth 0) in accent, deeper in text/muted.
+                let indent = "    ".repeat(e.depth);
+                let label = if e.truncated {
+                    format!("{indent}{}  …", e.name)
+                } else {
+                    format!("{indent}{}", e.name)
+                };
+                let color = if e.depth == 0 { accent } else { txt };
+                list = list.push(
+                    text(label)
+                        .size(14)
+                        .font(MONO)
+                        .color(color)
+                        .wrapping(text::Wrapping::None),
+                );
+            }
+        }
+
+        let scroll = scrollable(container(list).padding(iced::Padding::default().right(SP_MD)))
+            .height(Length::Fill);
+
+        let header = row![
+            text("Directory tree").size(20).color(accent),
+            space().width(Length::Fill),
+            button(text("← Back").size(14).wrapping(text::Wrapping::None))
+                .padding([SP_XS, SP_SM])
+                .style(theme::secondary_button(accent, txt))
+                .on_press(Message::BackToStart),
+        ]
+        .align_y(iced::Alignment::Center)
+        .spacing(SP_SM);
+
+        container(column![header, scroll].spacing(SP_MD).height(Length::Fill))
+            .style(theme::panel(self.preset.surface()))
+            .padding(SP_MD)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into()
     }
 }
 
