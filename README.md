@@ -79,7 +79,6 @@ Verify it is installed:
 ```sh
 rclone version
 ```
-```
 
 ### 2. A cloud remote
 
@@ -127,9 +126,10 @@ The two binaries land in `target/release/`:
 You can run them from there, or copy them somewhere on your `PATH`:
 
 ```sh
-cp target/release/nightjar-cli ~/.local/bin/nightjar
+cp target/release/nightjar-cli ~/.local/bin/nightjar-cli
 cp target/release/nightjar-gui ~/.local/bin/nightjar-gui
 ```
+If nightjar-cli isn't found afterward, ensure ~/.local/bin is on your PATH (it is by default on most distros).
 
 ---
 
@@ -340,6 +340,7 @@ or any [systemd calendar expression](https://www.freedesktop.org/software/system
 crontab -e
 ```
 Add a line — e.g. every day at 2am:
+0 2 * * * /home/you/.local/bin/nightjar-cli backup -y --partial-method smallest-first
 
 ### Option C — Just remind me (I'll run it myself)
 
