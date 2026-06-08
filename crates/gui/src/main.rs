@@ -91,6 +91,8 @@ struct App {
     progress: Arc<Mutex<f32>>,
     displayed_progress: f32,
     preset: Preset,
+    report: Option<BackupReport>,
+    last_backup_size: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -117,6 +119,14 @@ enum Message {
     Tick,
     ApplyPreset,
     ThemeSelected(Preset),
+    ReportReady(Vec<String>, u64, Option<u64>),
+}
+
+#[derive(Debug, Clone)]
+struct BackupReport {
+    folders: Vec<String>,
+    total_bytes: u64,
+    free_remaining: Option<u64>,
 }
 
 fn boot() -> (App, Task<Message>) {
@@ -132,6 +142,8 @@ fn boot() -> (App, Task<Message>) {
         progress: Arc::new(Mutex::new(0.0)),
         displayed_progress: 0.0,
         preset: Preset::Ember,
+        report: None,
+        last_backup_size: 0,
     };
     let task = Task::perform(
         run_preflight_blocking(),
@@ -239,6 +251,13 @@ async fn backup_one_blocking(
     .unwrap_or_else(|e| Err(format!("internal task error: {e}")))
 }
 
+async fn query_free_space(remote: String) -> Option<u64> {
+    tokio::task::spawn_blocking(move || rclone::check_free_space(&remote).ok())
+        .await
+        .ok()
+        .flatten()
+}
+
 /// Given the ordered sources and how many are done, either launches the next
 /// source's backup or, if all are done, returns None to signal completion.
 fn next_source_task(
@@ -303,6 +322,7 @@ impl App {
                 self.notice = None;
                 // If shortfall, jump straight into measuring.
                 if let PreflightResult::Ready { report } = &result {
+                    self.last_backup_size = report.backup_size_bytes;
                     if let SpaceStatus::Shortfall { free_bytes, .. } = report.space {
                         if let Some(cfg) = config.clone() {
                             self.phase = Phase::Measuring;
@@ -469,6 +489,11 @@ impl App {
                         partial::CustomValidation::Fits { .. } if !chosen.is_empty() => {
                             if let Some(config) = &self.config {
                                 let config = config.clone();
+                                // Report accuracy: the backed-up size is the sum of
+                                // the chosen folders, not the full configured set.
+                                self.last_backup_size = chosen
+                                    .iter()
+                                    .fold(0u64, |acc, s| acc.saturating_add(s.size_bytes));
                                 let sources: Vec<Source> =
                                     chosen.iter().map(|s| s.source.clone()).collect();
                                 let current = sources[0].name.clone();
@@ -496,10 +521,9 @@ impl App {
                     match result {
                         Err(message) => {
                             // First failure: stop, do not touch later sources.
-                            let outcome = BackupOutcome::Failed(message);
-                            // (No power-off: Failed yields no permit.)
-                            self.phase = Phase::Finished(outcome);
-                            return Task::none();
+                            // A failed backup gets no report and no power-off.
+                            self.phase = Phase::Finished(BackupOutcome::Failed(message));
+                            Task::none()
                         }
                         Ok(()) => {
                             *done += 1;
@@ -549,8 +573,16 @@ impl App {
                                         }
                                     }
                                 }
+                                // Assemble the backup report from data we have.
+                                let folders: Vec<String> =
+                                    sources_clone.iter().map(|s| s.name.clone()).collect();
+                                let total = self.last_backup_size;
+                                let remote = self.remote.clone();
+                                self.report = None; // clear stale, fill when query returns
                                 self.phase = Phase::Finished(outcome);
-                                Task::none()
+                                Task::perform(query_free_space(remote), move |free| {
+                                    Message::ReportReady(folders.clone(), total, free)
+                                })
                             }
                         }
                     }
@@ -706,6 +738,14 @@ impl App {
                         Message::PreflightFinished(result, config, remote, remotes)
                     },
                 )
+            }
+            Message::ReportReady(folders, total_bytes, free_remaining) => {
+                self.report = Some(BackupReport {
+                    folders,
+                    total_bytes,
+                    free_remaining,
+                });
+                Task::none()
             }
         }
     }
@@ -1077,6 +1117,9 @@ impl App {
             }
 
             Phase::Finished(outcome) => {
+                let accent = self.preset.accent();
+                let txt = Color::from_rgb8(0xc9, 0xbf, 0xc4);
+                let muted = self.preset.muted();
                 let summary: Element<'_, Message> = match outcome {
                     BackupOutcome::FullVerified => text("✓  Full backup completed and verified")
                         .size(18)
@@ -1095,19 +1138,49 @@ impl App {
                     .spacing(SP_XS)
                     .into(),
                 };
-                column![
-                    summary,
+
+                let mut col = column![summary].spacing(SP_MD);
+
+                // Report (shown for successful backups once data is ready).
+                if !matches!(outcome, BackupOutcome::Failed(_)) {
+                    if let Some(r) = &self.report {
+                        let mut rep =
+                            column![text("Backup report").size(15).color(accent),].spacing(SP_XS);
+                        rep = rep.push(
+                            text(format!("Folders backed up: {}", r.folders.join(", "))).size(13),
+                        );
+                        rep = rep.push(
+                            text(format!("Space occupied: {}", human_bytes(r.total_bytes)))
+                                .size(13),
+                        );
+                        let remaining = match r.free_remaining {
+                            Some(b) => human_bytes(b),
+                            None => "unknown".to_string(),
+                        };
+                        rep = rep.push(
+                            text(format!("Remaining cloud space: {remaining}"))
+                                .size(13)
+                                .color(muted),
+                        );
+                        col = col.push(
+                            container(rep)
+                                .style(theme::panel(self.preset.surface()))
+                                .padding(SP_SM),
+                        );
+                    }
+                }
+
+                col = col.push(
                     button(
                         text("Back to start")
                             .size(14)
-                            .wrapping(text::Wrapping::None)
+                            .wrapping(text::Wrapping::None),
                     )
                     .padding([SP_XS, SP_SM])
                     .style(theme::secondary_button(accent, txt))
                     .on_press(Message::BackToStart),
-                ]
-                .spacing(SP_MD)
-                .into()
+                );
+                col.into()
             }
         };
 
